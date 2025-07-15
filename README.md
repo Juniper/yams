@@ -6,18 +6,25 @@ environments providing rich routing solution. JCNR runs on kubernetes
 in these deployment environments.
 
 YAMS (Yet Another MCP Server) is a Model Context Protocol (MCP)
-server with Kubernetes cluster management. This MCP is generic
-in nature and can be used for any kubernetes cluster environment.
-Analysing JCNR deployments is one such use case where this MCP server 
-can talk to multiple kubernetes clusters running JCNR instances
-and relate data for better understanding of the deployments.
+server with Kubernetes support. This MCP server is generic
+in nature and can be used for any kubernetes environment either using
+kubeconfig or SSH.
+
+Analysing JCNR deployments is one the usecases for YAMS where YAMS 
+can talk to multiple kubernetes clusters running JCNR instances,
+fetches information related JCNR and relate data for better
+understanding of the deployments. 
+
+There are generic tools provided in YAMS for accessing any pod in any
+namespace in a given cluster.
 
 ## Features
 
 - HTTP-based MCP server using FastAPI
 - Kubernetes integration with kubeconfig support
 - SSH tunnel support for remote cluster access
-- Tools: `list_clusters`, `list_namespaces`, `list_pods`, `execute_command`
+- Generic Tools: `list_clusters`, `list_namespaces`, `list_pods`, `execute_command`
+- Specialized JCNR Tools: `execute_dpdk_command`, `execute_agent_command`, `execute_crpd_command`
 - VS Code Copilot Chat compatible
 - CORS support and health check endpoint
 
@@ -222,6 +229,21 @@ This server implements the Model Context Protocol over HTTP and supports:
 ### 4. **execute_command**
    - Description: Execute a command in a specific pod
    - Parameters: `pod_name` (string), `namespace` (string), `command` (string), `container` (optional string), `cluster_name` (optional string)
+
+### 5. **execute_dpdk_command**
+   - Description: Execute a command in all DPDK pods (vrdpdk) in contrail namespace across all clusters
+   - Parameters: `command` (string), `cluster_name` (optional string) - executes on all clusters if not specified
+   - Example Commands: `vif --list`, `dropstats`, `vif --get 0`
+
+### 6. **execute_agent_command**
+   - Description: Execute a command in all Contrail Agent pods (vrouter-nodes) in contrail namespace across all clusters
+   - Parameters: `command` (string), `cluster_name` (optional string) - executes on all clusters if not specified
+   - Example Commands: `contrail-status`, `vif --list`, `nh --list`
+
+### 7. **execute_crpd_command**
+   - Description: Execute a command in all cRPD (Contrail Routing Protocol Daemon) pods in jcnr namespace across all clusters
+   - Parameters: `command` (string), `cluster_name` (optional string) - executes on all clusters if not specified
+   - Example Commands: `show route`, `show bgp summary`, `show interfaces terse`
 
 ## Kubernetes Integration
 

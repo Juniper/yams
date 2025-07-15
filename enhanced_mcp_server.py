@@ -398,6 +398,129 @@ class KubernetesManager:
         except Exception as e:
             logger.error(f"Error executing command in pod: {e}")
             raise Exception(f"Failed to execute command: {str(e)}")
+    
+    def execute_dpdk_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
+        """Execute a command in all DPDK pods (vrdpdk) in contrail namespace."""
+        results = []
+        clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        for cluster in clusters_to_check:
+            try:
+                # Get pods in contrail namespace
+                pods = self.list_pods("contrail", cluster)
+                dpdk_pods = [pod for pod in pods if "vrdpdk" in pod["name"]]
+                
+                for pod in dpdk_pods:
+                    try:
+                        result = self.execute_pod_command(
+                            pod["name"], "contrail", command, None, cluster
+                        )
+                        result["pod_type"] = "DPDK"
+                        results.append(result)
+                    except Exception as e:
+                        results.append({
+                            "pod": pod["name"],
+                            "namespace": "contrail",
+                            "command": command,
+                            "cluster": cluster,
+                            "pod_type": "DPDK",
+                            "output": f"Failed to execute command: {str(e)}",
+                            "status": "error"
+                        })
+                        
+            except Exception as e:
+                results.append({
+                    "cluster": cluster,
+                    "namespace": "contrail",
+                    "command": command,
+                    "pod_type": "DPDK",
+                    "output": f"Failed to access cluster: {str(e)}",
+                    "status": "error"
+                })
+        
+        return results
+    
+    def execute_agent_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
+        """Execute a command in all Contrail Agent pods (vrouter-nodes) in contrail namespace."""
+        results = []
+        clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        for cluster in clusters_to_check:
+            try:
+                # Get pods in contrail namespace
+                pods = self.list_pods("contrail", cluster)
+                agent_pods = [pod for pod in pods if "vrouter-nodes" in pod["name"] and "vrdpdk" not in pod["name"]]
+                
+                for pod in agent_pods:
+                    try:
+                        result = self.execute_pod_command(
+                            pod["name"], "contrail", command, None, cluster
+                        )
+                        result["pod_type"] = "Agent"
+                        results.append(result)
+                    except Exception as e:
+                        results.append({
+                            "pod": pod["name"],
+                            "namespace": "contrail",
+                            "command": command,
+                            "cluster": cluster,
+                            "pod_type": "Agent",
+                            "output": f"Failed to execute command: {str(e)}",
+                            "status": "error"
+                        })
+                        
+            except Exception as e:
+                results.append({
+                    "cluster": cluster,
+                    "namespace": "contrail",
+                    "command": command,
+                    "pod_type": "Agent",
+                    "output": f"Failed to access cluster: {str(e)}",
+                    "status": "error"
+                })
+        
+        return results
+    
+    def execute_crpd_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
+        """Execute a command in all cRPD pods in jcnr namespace."""
+        results = []
+        clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        for cluster in clusters_to_check:
+            try:
+                # Get pods in jcnr namespace
+                pods = self.list_pods("jcnr", cluster)
+                crpd_pods = [pod for pod in pods if "crpd" in pod["name"].lower()]
+                
+                for pod in crpd_pods:
+                    try:
+                        result = self.execute_pod_command(
+                            pod["name"], "jcnr", command, None, cluster
+                        )
+                        result["pod_type"] = "cRPD"
+                        results.append(result)
+                    except Exception as e:
+                        results.append({
+                            "pod": pod["name"],
+                            "namespace": "jcnr",
+                            "command": command,
+                            "cluster": cluster,
+                            "pod_type": "cRPD",
+                            "output": f"Failed to execute command: {str(e)}",
+                            "status": "error"
+                        })
+                        
+            except Exception as e:
+                results.append({
+                    "cluster": cluster,
+                    "namespace": "jcnr",
+                    "command": command,
+                    "pod_type": "cRPD",
+                    "output": f"Failed to access cluster: {str(e)}",
+                    "status": "error"
+                })
+        
+        return results
 
 
 class EnhancedMCPHTTPServer:
@@ -516,6 +639,60 @@ class EnhancedMCPHTTPServer:
                             },
                             "required": ["pod_name", "namespace", "command"]
                         }
+                    ),
+                    types.Tool(
+                        name="execute_dpdk_command",
+                        description="Execute a command in DPDK pods (vrdpdk) in contrail namespace across all clusters",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "Command to execute in DPDK pods"
+                                },
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, executes on all clusters if not specified)"
+                                }
+                            },
+                            "required": ["command"]
+                        }
+                    ),
+                    types.Tool(
+                        name="execute_agent_command",
+                        description="Execute a command in Contrail Agent pods (vrouter-nodes) in contrail namespace across all clusters",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "Command to execute in Agent pods"
+                                },
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, executes on all clusters if not specified)"
+                                }
+                            },
+                            "required": ["command"]
+                        }
+                    ),
+                    types.Tool(
+                        name="execute_crpd_command",
+                        description="Execute a command in cRPD pods in jcnr namespace across all clusters",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "Command to execute in cRPD pods"
+                                },
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, executes on all clusters if not specified)"
+                                }
+                            },
+                            "required": ["command"]
+                        }
                     )
                 ]
                 tools.extend(k8s_tools)
@@ -608,6 +785,111 @@ class EnhancedMCPHTTPServer:
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error executing command: {str(e)}")]
                 
+                elif name == "execute_dpdk_command":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    command = arguments.get("command")
+                    cluster_name = arguments.get("cluster_name")
+                    
+                    if not command:
+                        return [types.TextContent(type="text", text="Error: command parameter is required")]
+                    
+                    try:
+                        results = self.k8s_manager.execute_dpdk_command(command, cluster_name)
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No DPDK pods found in contrail namespace")]
+                        
+                        output_lines = [f"DPDK Command Execution Results for: {command}"]
+                        output_lines.append("=" * 60)
+                        
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            pod = result.get("pod", "unknown")
+                            status = result.get("status", "unknown")
+                            pod_output = result.get("output", "")
+                            
+                            output_lines.append(f"\nCluster: {cluster}")
+                            output_lines.append(f"Pod: {pod}")
+                            output_lines.append(f"Status: {status}")
+                            output_lines.append(f"Output:\n{pod_output}")
+                            output_lines.append("-" * 40)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error executing DPDK command: {str(e)}")]
+                
+                elif name == "execute_agent_command":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    command = arguments.get("command")
+                    cluster_name = arguments.get("cluster_name")
+                    
+                    if not command:
+                        return [types.TextContent(type="text", text="Error: command parameter is required")]
+                    
+                    try:
+                        results = self.k8s_manager.execute_agent_command(command, cluster_name)
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No Agent pods found in contrail namespace")]
+                        
+                        output_lines = [f"Agent Command Execution Results for: {command}"]
+                        output_lines.append("=" * 60)
+                        
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            pod = result.get("pod", "unknown")
+                            status = result.get("status", "unknown")
+                            pod_output = result.get("output", "")
+                            
+                            output_lines.append(f"\nCluster: {cluster}")
+                            output_lines.append(f"Pod: {pod}")
+                            output_lines.append(f"Status: {status}")
+                            output_lines.append(f"Output:\n{pod_output}")
+                            output_lines.append("-" * 40)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error executing Agent command: {str(e)}")]
+                
+                elif name == "execute_crpd_command":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    command = arguments.get("command")
+                    cluster_name = arguments.get("cluster_name")
+                    
+                    if not command:
+                        return [types.TextContent(type="text", text="Error: command parameter is required")]
+                    
+                    try:
+                        results = self.k8s_manager.execute_crpd_command(command, cluster_name)
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No cRPD pods found in jcnr namespace")]
+                        
+                        output_lines = [f"cRPD Command Execution Results for: {command}"]
+                        output_lines.append("=" * 60)
+                        
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            pod = result.get("pod", "unknown")
+                            status = result.get("status", "unknown")
+                            pod_output = result.get("output", "")
+                            
+                            output_lines.append(f"\nCluster: {cluster}")
+                            output_lines.append(f"Pod: {pod}")
+                            output_lines.append(f"Status: {status}")
+                            output_lines.append(f"Output:\n{pod_output}")
+                            output_lines.append("-" * 40)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error executing cRPD command: {str(e)}")]
+                
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             
@@ -669,6 +951,9 @@ Available Tools:
 - list_namespaces: List namespaces in a cluster
 - list_pods: List pods in a namespace
 - execute_command: Execute commands in pods
+- execute_dpdk_command: Execute commands in all DPDK pods (vrdpdk) in contrail namespace
+- execute_agent_command: Execute commands in all Agent pods (vrouter-nodes) in contrail namespace
+- execute_crpd_command: Execute commands in all cRPD pods in jcnr namespace
 """
             
             elif uri == "memory://k8s-help":
