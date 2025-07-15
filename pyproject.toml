@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-http-server"
+version = "1.0.0"
+description = "A Model Context Protocol server that runs over HTTP"
+authors = [
+    {name = "MCP Developer", email = "developer@example.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = [
+    "mcp>=1.0.0",
+    "uvicorn>=0.27.0",
+    "fastapi>=0.100.0",
+    "pydantic>=2.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/example/mcp-http-server"
+Repository = "https://github.com/example/mcp-http-server"
+
+[project.scripts]
+mcp-http-server = "mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mcp_server*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
