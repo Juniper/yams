@@ -26,7 +26,7 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
 - Kubernetes integration with kubeconfig support
 - SSH tunnel support for remote cluster access
 - Generic Tools: `list_clusters`, `list_namespaces`, `list_pods`, `execute_command`
-- Specialized JCNR Tools: `execute_dpdk_command`, `execute_agent_command`, `execute_crpd_command`
+- Specialized JCNR Tools: `execute_dpdk_command`, `execute_agent_command`, `execute_crpd_command`, `check_core_files`, `analyze_logs`
 - VS Code Copilot Chat compatible
 - CORS support and health check endpoint
 
@@ -273,8 +273,11 @@ This server implements the Model Context Protocol over HTTP and supports:
      - `cluster_name` (optional string) - Name of the cluster (checks all clusters if not specified)
      - `search_paths` (optional array) - Custom paths to search for core files (uses default paths if not specified)
      - `max_age_days` (optional integer) - Maximum age of core files to report in days (default: 7 days)
-   - Default Search Paths: `/tmp`, `/var/tmp`, `/cores`, `/var/cores`, `/var/crash`, `/var/log`, `/home`, `/root`
+   - Default Search Paths: `/cores`, `/var/cores`, `/var/crash`, `/var/log/crash`, `/var/log/cores`
    - Use Cases: Debugging crashes, system monitoring, troubleshooting application failures
+
+### 9. **analyze_logs**
+   - Description: Analyze log files in `/var/log/` and `/log/` directories on cluster nodes. Searches for errors, large files, and recent activity
 
 ## Kubernetes Integration
 

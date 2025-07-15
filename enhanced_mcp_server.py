@@ -653,6 +653,213 @@ class KubernetesManager:
                 })
         
         return results
+    
+    def analyze_logs(self, cluster_name: str = None, pod_name: str = None, namespace: str = None, 
+                    log_paths: List[str] = None, max_age_days: int = 7, max_lines: int = 100, 
+                    pattern: str = None) -> List[Dict[str, Any]]:
+        """Analyze log files in /var/log/ and /log/ directories in specific pods or cluster nodes."""
+        results = []
+        clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        # Default log paths to search
+        default_log_paths = [
+            "/var/log",
+            "/log",
+            "/var/log/containers",
+            "/var/log/pods",
+            "/var/log/syslog*",
+            "/var/log/messages*",
+            "/var/log/kern.log*",
+            "/var/log/dmesg*",
+            "/var/log/contrail",
+            "/var/log/jcnr"
+        ]
+        
+        paths_to_search = log_paths if log_paths else default_log_paths
+        
+        for cluster in clusters_to_check:
+            try:
+                # Get Kubernetes client for this specific cluster
+                self.get_k8s_client(cluster)
+                v1 = client.CoreV1Api()
+                
+                # If specific pod is requested, analyze only that pod
+                if pod_name and namespace:
+                    try:
+                        # Get the specific pod
+                        pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+                        
+                        # Analyze logs for this specific pod
+                        log_analysis = self._analyze_pod_logs(pod, cluster, paths_to_search, pattern, max_lines)
+                        
+                        results.append({
+                            "cluster": cluster,
+                            "pod": pod_name,
+                            "namespace": namespace,
+                            "node": pod.spec.node_name,
+                            "log_analysis": log_analysis,
+                            "search_paths": paths_to_search,
+                            "pattern_used": pattern or "error|fail|panic|segfault|oops|bug|critical|fatal"
+                        })
+                        
+                    except Exception as e:
+                        results.append({
+                            "cluster": cluster,
+                            "pod": pod_name,
+                            "namespace": namespace,
+                            "error": f"Failed to analyze logs for pod '{pod_name}': {str(e)}",
+                            "log_analysis": {}
+                        })
+                else:
+                    # Original behavior: scan all nodes
+                    nodes = v1.list_node()
+                    
+                    for node in nodes.items:
+                        node_name = node.metadata.name
+                        try:
+                            # Find a suitable pod running on this node
+                            pods = v1.list_pod_for_all_namespaces(field_selector=f"spec.nodeName={node_name}")
+                            
+                            # Look for privileged pods or system pods that can access host filesystem
+                            suitable_pods = []
+                            for pod in pods.items:
+                                if (pod.metadata.namespace in ["kube-system", "contrail", "jcnr"] or
+                                    any("system" in container.name or "node" in container.name 
+                                        for container in pod.spec.containers)):
+                                    suitable_pods.append(pod)
+                            
+                            if not suitable_pods:
+                                results.append({
+                                    "cluster": cluster,
+                                    "node": node_name,
+                                    "error": "No suitable pod found on node to access logs",
+                                    "log_analysis": {}
+                                })
+                                continue
+                            
+                            # Use the first suitable pod
+                            pod = suitable_pods[0]
+                            
+                            # Analyze logs for this node via the pod
+                            log_analysis = self._analyze_pod_logs(pod, cluster, paths_to_search, pattern, max_lines)
+                            
+                            results.append({
+                                "cluster": cluster,
+                                "node": node_name,
+                                "log_analysis": log_analysis,
+                                "search_paths": paths_to_search,
+                                "pod_used": f"{pod.metadata.namespace}/{pod.metadata.name}",
+                                "pattern_used": pattern or "error|fail|panic|segfault|oops|bug|critical|fatal"
+                            })
+                            
+                        except Exception as e:
+                            results.append({
+                                "cluster": cluster,
+                                "node": node_name,
+                                "error": f"Failed to analyze logs: {str(e)}",
+                                "log_analysis": {}
+                            })
+                            
+            except Exception as e:
+                results.append({
+                    "cluster": cluster,
+                    "error": f"Failed to access cluster: {str(e)}",
+                    "log_analysis": {}
+                })
+        
+        return results
+    
+    def _analyze_pod_logs(self, pod, cluster: str, paths_to_search: List[str], pattern: str, max_lines: int) -> Dict[str, Any]:
+        """Helper method to analyze logs within a specific pod."""
+        log_analysis = {}
+        
+        # 1. List recent log files  
+        recent_logs_result = self.execute_pod_command(
+            pod.metadata.name, 
+            pod.metadata.namespace, 
+            ["sh", "-c", "ls /var/log/"], 
+            None, 
+            cluster
+        )
+        
+        if recent_logs_result.get("status") == "success":
+            log_files = [f.strip() for f in recent_logs_result["output"].strip().split('\n') if f.strip()]
+            log_analysis["recent_log_files"] = log_files[:10]  # Limit to 10 files
+        else:
+            log_analysis["recent_log_files"] = []
+        
+        # 2. Check for errors in recent logs
+        if pattern:
+            # Use custom pattern
+            error_result = self.execute_pod_command(
+                pod.metadata.name, 
+                pod.metadata.namespace, 
+                ["sh", "-c", f"grep -i '{pattern}' /var/log/* 2>/dev/null || echo 'No matches found'"], 
+                None, 
+                cluster
+            )
+        else:
+            # Default error patterns - search for common error keywords
+            error_result = self.execute_pod_command(
+                pod.metadata.name, 
+                pod.metadata.namespace, 
+                ["sh", "-c", "grep -i 'error' /var/log/* 2>/dev/null || echo 'No error patterns found'"], 
+                None, 
+                cluster
+            )
+        
+        if error_result.get("status") == "success" and error_result.get("output"):
+            error_lines = [line.strip() for line in error_result["output"].strip().split('\n') if line.strip()]
+            log_analysis["error_patterns"] = error_lines
+        else:
+            log_analysis["error_patterns"] = []
+        
+        # 3. Get disk usage of log directories
+        du_result = self.execute_pod_command(
+            pod.metadata.name, 
+            pod.metadata.namespace, 
+            ["sh", "-c", "ls -la /var/log/"], 
+            None, 
+            cluster
+        )
+        
+        if du_result.get("status") == "success" and du_result.get("output"):
+            disk_usage = [line.strip() for line in du_result["output"].strip().split('\n') if line.strip()]
+            log_analysis["log_directory_listing"] = disk_usage
+        else:
+            log_analysis["log_directory_listing"] = []
+        
+        # 4. Check for large log files - simplified check
+        large_files_result = self.execute_pod_command(
+            pod.metadata.name, 
+            pod.metadata.namespace, 
+            ["sh", "-c", "ls -la /var/log/* 2>/dev/null || echo 'Log files not accessible'"], 
+            None, 
+            cluster
+        )
+        
+        if large_files_result.get("status") == "success" and large_files_result.get("output"):
+            large_files = [line.strip() for line in large_files_result["output"].strip().split('\n') if line.strip()]
+            log_analysis["large_files"] = large_files
+        else:
+            log_analysis["large_files"] = []
+        
+        # 5. Get recent system messages - try to access log file contents
+        recent_result = self.execute_pod_command(
+            pod.metadata.name, 
+            pod.metadata.namespace, 
+            ["sh", "-c", f"find /var/log -type f \\( -name '*.log' -o -name 'messages*' -o -name 'syslog*' \\) 2>/dev/null | {{ count=0; while read file && [ $count -lt 3 ]; do echo '=== '$file' ==='; tail -{max_lines//5} \"$file\" 2>/dev/null || echo 'Cannot read '$file; count=$((count+1)); done; }}"], 
+            None, 
+            cluster
+        )
+        
+        if recent_result.get("status") == "success" and recent_result.get("output"):
+            recent_lines = recent_result["output"].strip().split('\n')[-max_lines:]  # Last max_lines lines
+            log_analysis["recent_messages"] = [line.strip() for line in recent_lines if line.strip()]
+        else:
+            log_analysis["recent_messages"] = []
+        
+        return log_analysis
 
 
 class EnhancedMCPHTTPServer:
@@ -844,6 +1051,45 @@ class EnhancedMCPHTTPServer:
                                 "max_age_days": {
                                     "type": "integer",
                                     "description": "Maximum age of core files to report in days (optional, defaults to 7 days)"
+                                }
+                            },
+                            "required": []
+                        }
+                    ),
+                    types.Tool(
+                        name="analyze_logs",
+                        description="Analyze log files in /var/log/ and /log/ directories on cluster nodes. Searches for errors, large files, and recent activity",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, analyzes all clusters if not specified)"
+                                },
+                                "pod_name": {
+                                    "type": "string",
+                                    "description": "Name of a specific pod to analyze logs for (optional, scans all nodes if not specified)"
+                                },
+                                "namespace": {
+                                    "type": "string",
+                                    "description": "Kubernetes namespace of the pod (required if pod_name is specified)"
+                                },
+                                "log_paths": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Custom paths to search for log files (optional, uses default paths if not specified)"
+                                },
+                                "max_age_days": {
+                                    "type": "integer",
+                                    "description": "Maximum age of log files to analyze in days (optional, defaults to 7 days)"
+                                },
+                                "max_lines": {
+                                    "type": "integer",
+                                    "description": "Maximum number of lines to return from log analysis (optional, defaults to 100)"
+                                },
+                                "pattern": {
+                                    "type": "string",
+                                    "description": "Custom regex pattern to search for in logs (optional, defaults to common error patterns)"
                                 }
                             },
                             "required": []
@@ -1087,11 +1333,111 @@ class EnhancedMCPHTTPServer:
                             output_lines.append("-" * 40)
                         
                         output_lines.insert(1, f"Total core files found: {total_core_files}")
-                        output_lines.insert(2, "=" * 60)
+                        output_lines.insert(2, "=" * 60);
                         
                         return [types.TextContent(type="text", text="\n".join(output_lines))]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error checking core files: {str(e)}")]
+                
+                elif name == "analyze_logs":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    cluster_name = arguments.get("cluster_name")
+                    pod_name = arguments.get("pod_name")
+                    namespace = arguments.get("namespace")
+                    log_paths = arguments.get("log_paths")
+                    max_age_days = arguments.get("max_age_days", 7)
+                    max_lines = arguments.get("max_lines", 100)
+                    pattern = arguments.get("pattern")
+                    
+                    try:
+                        results = self.k8s_manager.analyze_logs(cluster_name, pod_name, namespace, log_paths, max_age_days, max_lines, pattern)
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No clusters found or accessible for log analysis")]
+                        
+                        # Determine the analysis scope for the title
+                        if pod_name and namespace:
+                            scope = f"for pod {pod_name} in namespace {namespace}"
+                        else:
+                            scope = "for all cluster nodes"
+                        
+                        output_lines = [f"Log Analysis Results {scope} (last {max_age_days} days, max {max_lines} lines)"]
+                        output_lines.append("=" * 60)
+                        
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            pod = result.get("pod")
+                            namespace_result = result.get("namespace")
+                            node = result.get("node", "unknown")
+                            error = result.get("error")
+                            log_analysis = result.get("log_analysis", {})
+                            
+                            output_lines.append(f"\nCluster: {cluster}")
+                            if pod and namespace_result:
+                                output_lines.append(f"Pod: {pod}")
+                                output_lines.append(f"Namespace: {namespace_result}")
+                                output_lines.append(f"Node: {node}")
+                            else:
+                                output_lines.append(f"Node: {node}")
+                                pod_used = result.get("pod_used")
+                                if pod_used:
+                                    output_lines.append(f"Analysis pod: {pod_used}")
+                            
+                            if error:
+                                output_lines.append(f"Error: {error}")
+                            else:
+                                # Recent log files
+                                recent_files = log_analysis.get("recent_log_files", [])
+                                if recent_files:
+                                    output_lines.append(f"Recent log files ({len(recent_files)}):")
+                                    for log_file in recent_files[:5]:  # Show first 5
+                                        output_lines.append(f"  - {log_file}")
+                                    if len(recent_files) > 5:
+                                        output_lines.append(f"  ... and {len(recent_files) - 5} more files")
+                                else:
+                                    output_lines.append("No recent log files found")
+                                
+                                # Error patterns
+                                error_patterns = log_analysis.get("error_patterns", [])
+                                if error_patterns:
+                                    output_lines.append(f"\nError/Warning patterns found ({len(error_patterns)}):")
+                                    for error_line in error_patterns[:10]:  # Show first 10
+                                        output_lines.append(f"  {error_line}")
+                                    if len(error_patterns) > 10:
+                                        output_lines.append(f"  ... and {len(error_patterns) - 10} more entries")
+                                else:
+                                    output_lines.append("\nNo error patterns found")
+                                
+                                # Log directory listing
+                                log_directory_listing = log_analysis.get("log_directory_listing", [])
+                                if log_directory_listing:
+                                    output_lines.append(f"\nLog directory contents:")
+                                    for listing_line in log_directory_listing:
+                                        output_lines.append(f"  {listing_line}")
+                                
+                                # Large files
+                                large_files = log_analysis.get("large_files", [])
+                                if large_files:
+                                    output_lines.append(f"\nLarge log files (>10MB):")
+                                    for large_file in large_files[:5]:  # Show first 5
+                                        output_lines.append(f"  {large_file}")
+                                    if len(large_files) > 5:
+                                        output_lines.append(f"  ... and {len(large_files) - 5} more files")
+                                
+                                # Recent messages sample
+                                recent_messages = log_analysis.get("recent_messages", [])
+                                if recent_messages:
+                                    output_lines.append(f"\nRecent system messages (last {min(len(recent_messages), 5)}):")
+                                    for msg in recent_messages[-5:]:  # Show last 5
+                                        output_lines.append(f"  {msg}")
+                            
+                            output_lines.append("-" * 40)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error analyzing logs: {str(e)}")]
                 
                 else:
                     raise ValueError(f"Unknown tool: {name}")
