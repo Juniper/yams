@@ -30,21 +30,9 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
 - VS Code Copilot Chat compatible
 - CORS support and health check endpoint
 
-## Quick Setup
+## Configuration
 
-### 1. Install Dependencies
-
-```bash
-# Create virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate  # On macOS/Linux
-# or venv\Scripts\activate  # On Windows
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 2. Configure Clusters
+### Configure Clusters
 
 Create a `clusters.json` file with your cluster configurations. Each cluster is defined by a unique name (key) and configuration object (value).
 
@@ -173,14 +161,47 @@ Create a `clusters.json` file with your cluster configurations. Each cluster is 
 }
 ```
 
-### 3. Start the Server
+## Quick Setup
 
+Choose your preferred installation method:
+
+### Option A: Docker (Recommended)
+
+Docker provides an isolated, reproducible environment with all dependencies included.
+
+```bash
+# Quick start - automated setup
+./docker-run.sh
+
+# Check health
+curl http://localhost:40041/health
+```
+
+**Docker automatically handles:**
+- Default configuration (uses sample config if none provided)
+- SSH key permissions
+- Directory creation
+- Service startup
+
+### Option B: Local Python Installation
+
+```bash
+# Create virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # On macOS/Linux
+# or venv\Scripts\activate  # On Windows
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**With Local Python:**
 ```bash
 # Start server with Kubernetes sources
 python enhanced_mcp_server.py --port 40041 --clusters-config clusters.json
 ```
 
-### 4. Configure VS Code
+## Configure VS Code
 
 Add to your VS Code `settings.json`:
 
@@ -195,10 +216,9 @@ Add to your VS Code `settings.json`:
   }
 }
 ```
-
 ## Command Line Options
 
-- `--port`: Port to run the server on (default: 8000)
+- `--port`: Port to run the server on (default: 40041)
 - `--clusters-config`: Path to JSON file containing cluster configurations
 
 ## API Endpoints
@@ -419,9 +439,7 @@ Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) and type "Tasks: Run Task" to a
 - **Test Server Health**: Tests if the server is responding
 - **Setup Virtual Environment**: Creates a Python virtual environment
 
-## Production Deployment
-
-### Security Considerations
+## Security Considerations
 
 #### General Security
 - Add authentication if deploying publicly
@@ -441,13 +459,6 @@ Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) and type "Tasks: Run Task" to a
 - **Temporary Files**: The server creates temporary kubeconfig files for SSH tunneled clusters. These are automatically cleaned up on shutdown
 - **Credential Storage**: Avoid storing sensitive credentials in cluster configuration files. Use environment variables or secure credential stores when possible
 
-### Performance Optimization
-
-- Use a production ASGI server like Gunicorn
-- Add caching for frequently accessed resources
-- Implement connection pooling for database connections
-- Monitor server performance and resource usage
-
 ## Requirements
 
 See `requirements.txt` for the complete list of dependencies. Key requirements include:
@@ -459,84 +470,69 @@ See `requirements.txt` for the complete list of dependencies. Key requirements i
 - paramiko and sshtunnel (optional, for SSH tunnel support)
 - pydantic
 
-## Support
-
-For issues or questions:
-
-1. Check the console output for error messages
-2. Verify all dependencies are installed correctly
-3. Test with the provided examples
-4. Review the MCP protocol documentation
-5. Check VS Code developer console for client-side errors
-6. Test SSH connections manually before configuring tunnels
-
-## SSH Public Key Authentication Setup
-
-When using SSH tunnel access with key-based authentication, follow these steps:
-
-### 1. Generate SSH Key Pair
-
-```bash
-# Generate RSA key pair (replace 'mykey' with your desired key name)
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/mykey
-
-# Set correct permissions
-chmod 600 ~/.ssh/mykey
-chmod 644 ~/.ssh/mykey.pub
-```
-
-### 2. Install Public Key on Remote Server
-
-```bash
-# Copy your public key to the remote server (replace with your details)
-ssh-copy-id -i ~/.ssh/mykey.pub username@remote-host.com
-```
-
-Or manually:
-```bash
-# Copy public key content
-cat ~/.ssh/mykey.pub
-
-# SSH to remote server and add it
-ssh username@remote-host.com
-mkdir -p ~/.ssh
-echo "ssh-rsa AAAAB3NzaC1yc2E... your-public-key-here" >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-chmod 700 ~/.ssh
-```
-
-### 3. Test SSH Connection
-
-```bash
-# Test the key-based authentication (replace with your details)
-ssh -i ~/.ssh/mykey username@remote-host.com
-```
-
-### 4. Configure in clusters.json
-
-```json
-{
-  "my-cluster": {
-    "kubeconfig_path": "/home/username/.kube/config",
-    "ssh": {
-      "host": "remote-host.com",
-      "username": "username",
-      "key_path": "/home/localuser/.ssh/mykey",
-      "k8s_host": "localhost"
-    }
-  }
-}
-```
-
-### 5. Key Points
-
-- **Private Key** (e.g., `mykey`) - Used in `key_path` configuration
-- **Public Key** (e.g., `mykey.pub`) - Installed on remote server
-- SSH host key verification is automatically disabled for automation
-- Use either `key_path` OR `password` for authentication, not both
-- Ensure private key has correct permissions (600)
-
 #### Security Notes for SSH Tunnels
 - **SSL Certificate Bypass**: When using SSH tunnels, the MCP server automatically disables SSL certificate verification for the Kubernetes API server because certificates are not valid for `127.0.0.1` tunnel endpoints
 - **Production Considerations**: For production environments, consider using VPN connections or properly configured SSL certificates instead of SSH tunnels
 - **Credential Protection**: Never store SSH private keys or passwords in the clusters.json file if it might be shared or committed to version control
+
+## Docker Deployment
+
+YAMS includes Docker support for easy deployment and consistent environments.
+
+### Quick Start with Docker
+
+```bash
+# Automated setup
+./docker-run.sh
+```
+
+### Directory Setup
+
+The Docker script automatically creates these directories for volume mounting:
+
+```bash
+./clusters/      # Runtime cluster configurations (contains clusters.json)
+./sshkeys/       # SSH private keys for tunnel access  
+./kubeconfigs/   # Kubernetes config files
+```
+
+### File Placement Guide
+
+#### 1. **Cluster Configuration** (`./clusters/`)
+```bash
+# clusters.json should already be in the clusters/ directory
+# Edit ./clusters/clusters.json with your actual cluster settings
+```
+
+#### 2. **SSH Keys** (`./sshkeys/`)
+```bash
+# Copy SSH private keys (for clusters using SSH tunnels)
+cp ~/.ssh/id_rsa ./sshkeys/
+cp ~/.ssh/company_key ./sshkeys/
+
+# IMPORTANT: Set proper permissions BEFORE running Docker
+# SSH keys must have 600 permissions for security
+chmod 600 ./sshkeys/*
+```
+
+**Note**: SSH keys are mounted read-only in the container for security. Ensure permissions are set correctly on the host system before mounting.
+
+#### 3. **Kubeconfig Files** (`./kubeconfigs/`)
+```bash
+# Copy kubeconfig files referenced in clusters.json
+cp ~/.kube/config ./kubeconfigs/
+cp ~/.kube/prod-cluster ./kubeconfigs/
+cp ~/.kube/staging-cluster ./kubeconfigs/
+
+# Set proper permissions  
+chmod 600 ./kubeconfigs/*
+```
+
+### Volume Mount Details
+
+| Host Directory | Container Path | Purpose | Access Mode |
+|---------------|----------------|---------|-------------|
+| `./clusters/` | `/app/clusters/` | Active cluster configurations | Read-Write |
+| `./sshkeys/` | `/app/.ssh/` | SSH private keys for tunneling | Read-Only |
+| `./kubeconfigs/` | `/app/kubeconfigs/` | Kubernetes configuration files | Read-Only |
+

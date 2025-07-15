@@ -32,7 +32,6 @@ Thumbs.db
 # Configuration Files (sensitive)
 clusters.json
 gnmi-sources.json
-kubeconfig*
 .kube/
 
 # Testing
