@@ -1,22 +1,24 @@
 # YAMS (Yet Another MCP Server)
 
-Juniper Cloud-Native Router (JCNR) is Juniper's software-based, 
-cloud-native router solution. JCNR runs on various cloud and on-prem 
-environments providing rich routing solution. JCNR runs on kubernetes
-in these deployment environments.
+**YAMS** is a powerful Model Context Protocol (MCP) server designed for analyzing services running on Kubernetes clusters. Built with FastAPI, YAMS provides seamless integration with VS Code Copilot Chat and other MCP-compatible tools.
 
-YAMS (Yet Another MCP Server) is a Model Context Protocol (MCP)
-server with Kubernetes support. This MCP server is generic
-in nature and can be used for any kubernetes environment either using
-kubeconfig or SSH.
+## What is YAMS?
 
-Analysing JCNR deployments is one the usecases for YAMS where YAMS 
-can talk to multiple kubernetes clusters running JCNR instances,
-fetches information related JCNR and relate data for better
-understanding of the deployments. 
+YAMS is a **generic Kubernetes management tool** that can connect to any Kubernetes environment using standard kubeconfig files or secure SSH tunnels. While designed with Juniper Cloud-Native Router (JCNR) deployments in mind, YAMS works with any Kubernetes cluster.
 
-There are generic tools provided in YAMS for accessing any pod in any
-namespace in a given cluster.
+### Key Capabilities
+
+- **Multi-cluster Management**: Connect to multiple Kubernetes clusters simultaneously
+- **Flexible Access Methods**: Direct kubeconfig access or SSH tunnel connections for remote clusters
+- **Generic Kubernetes Operations**: List clusters, namespaces, pods, and execute commands in any pod
+- **JCNR-Specific Tools**: Specialized commands for DPDK, Contrail Agent, and cRPD components
+- **VS Code Integration**: Native support for VS Code Copilot Chat and other MCP clients
+
+### Use Cases
+
+- **Infrastructure Analysis**: Query and analyze Kubernetes deployments across multiple clusters
+- **JCNR Operations**: Monitor and troubleshoot Juniper Cloud-Native Router deployments
+- **Remote Cluster Access**: Securely access private or on-premises clusters through SSH tunnels
 
 ## Features
 
