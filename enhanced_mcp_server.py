@@ -521,6 +521,138 @@ class KubernetesManager:
                 })
         
         return results
+    
+    def check_core_files(self, cluster_name: str = None, search_paths: List[str] = None, max_age_days: int = 7) -> List[Dict[str, Any]]:
+        """Check for core files on nodes in Kubernetes clusters."""
+        results = []
+        clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        # Default search paths for core files
+        default_search_paths = [
+            "/cores",
+            "/var/cores",
+            "/var/crash",
+            "/var/log/crash",
+            "/var/log/cores"
+        ]
+        
+        paths_to_search = search_paths if search_paths else default_search_paths
+        
+        for cluster in clusters_to_check:
+            try:
+                # Get Kubernetes client for this specific cluster
+                self.get_k8s_client(cluster)
+                v1 = client.CoreV1Api()
+                nodes = v1.list_node()
+                
+                for node in nodes.items:
+                    node_name = node.metadata.name
+                    try:
+                        # Try to find a pod running on this node to execute commands
+                        # We'll use any pod that has host filesystem access
+                        pods = v1.list_pod_for_all_namespaces(field_selector=f"spec.nodeName={node_name}")
+                        
+                        # Look for privileged pods or system pods that can access host filesystem
+                        suitable_pods = []
+                        for pod in pods.items:
+                            if (pod.metadata.namespace in ["kube-system", "contrail", "jcnr"] or
+                                any("system" in container.name or "node" in container.name 
+                                    for container in pod.spec.containers)):
+                                suitable_pods.append(pod)
+                        
+                        if not suitable_pods:
+                            results.append({
+                                "cluster": cluster,
+                                "node": node_name,
+                                "error": "No suitable pod found on node to execute core file check",
+                                "core_files": []
+                            })
+                            continue
+                        
+                        # Use the first suitable pod
+                        pod = suitable_pods[0]
+                        
+                        # Build find command to search for core files
+                        find_commands = []
+                        for path in paths_to_search:
+                            # Search for files named core* that are newer than max_age_days
+                            # Use ls -la with find for better portability across different systems
+                            find_cmd = f"find {path} -name 'core*' -type f -mtime -{max_age_days} -exec ls -la {{}} \\; 2>/dev/null || true"
+                            find_commands.append(find_cmd)
+                        
+                        # Combine all find commands with semicolons instead of &&
+                        full_command = "; ".join(find_commands)
+                        
+                        # Execute the command
+                        command_result = self.execute_pod_command(
+                            pod.metadata.name, 
+                            pod.metadata.namespace, 
+                            f"sh -c '{full_command}'", 
+                            None, 
+                            cluster
+                        )
+                        
+                        core_files = []
+                        if command_result.get("status") == "success" and command_result.get("output"):
+                            output_lines = command_result["output"].strip().split('\n')
+                            for line in output_lines:
+                                if line.strip() and ("core" in line.lower() or line.startswith('-')):
+                                    try:
+                                        # Parse ls -la output format: permissions owner group size date time filename
+                                        # Example: -rw-r--r-- 1 root root 12345678 Dec 15 10:30 /path/to/core.12345
+                                        parts = line.strip().split()
+                                        if len(parts) >= 9 and parts[0].startswith('-'):  # File (not directory)
+                                            file_path = " ".join(parts[8:])  # Join remaining parts for full path
+                                            size_bytes = parts[4] if parts[4].isdigit() else "0"
+                                            
+                                            # Extract date and time (parts 5, 6, 7)
+                                            date_str = f"{parts[5]} {parts[6]} {parts[7]}" if len(parts) >= 8 else "unknown"
+                                            
+                                            # Convert size to human readable format
+                                            size_mb = int(size_bytes) / (1024 * 1024) if size_bytes.isdigit() else 0
+                                            size_str = f"{size_mb:.1f} MB" if size_mb > 1 else f"{size_bytes} bytes"
+                                            
+                                            core_files.append({
+                                                "path": file_path,
+                                                "size": size_str,
+                                                "modified": date_str,
+                                                "age_days": f"< {max_age_days}"
+                                            })
+                                    except Exception as e:
+                                        logger.warning(f"Failed to parse ls output line: {line}, error: {e}")
+                                        # Fallback: if parsing fails but line contains 'core', treat it as a potential core file
+                                        if "core" in line.lower():
+                                            core_files.append({
+                                                "path": line.strip(),
+                                                "size": "unknown",
+                                                "modified": "unknown", 
+                                                "age_days": f"< {max_age_days}"
+                                            })
+                        
+                        results.append({
+                            "cluster": cluster,
+                            "node": node_name,
+                            "core_files": core_files,
+                            "search_paths": paths_to_search,
+                            "pod_used": f"{pod.metadata.namespace}/{pod.metadata.name}"
+                        })
+                        
+                    except Exception as e:
+                        results.append({
+                            "cluster": cluster,
+                            "node": node_name,
+                            "error": f"Failed to check core files: {str(e)}",
+                            "core_files": []
+                        })
+                        
+            except Exception as e:
+                results.append({
+                    "cluster": cluster,
+                    "error": f"Failed to access cluster: {str(e)}",
+                    "core_files": []
+                })
+        
+        return results
 
 
 class EnhancedMCPHTTPServer:
@@ -692,6 +824,29 @@ class EnhancedMCPHTTPServer:
                                 }
                             },
                             "required": ["command"]
+                        }
+                    ),
+                    types.Tool(
+                        name="check_core_files",
+                        description="Check for core files on nodes in a Kubernetes cluster. Searches common locations for core dumps",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, checks all clusters if not specified)"
+                                },
+                                "search_paths": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Custom paths to search for core files (optional, uses default paths if not specified)"
+                                },
+                                "max_age_days": {
+                                    "type": "integer",
+                                    "description": "Maximum age of core files to report in days (optional, defaults to 7 days)"
+                                }
+                            },
+                            "required": []
                         }
                     )
                 ]
@@ -889,6 +1044,54 @@ class EnhancedMCPHTTPServer:
                         return [types.TextContent(type="text", text="\n".join(output_lines))]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error executing cRPD command: {str(e)}")]
+                
+                elif name == "check_core_files":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    cluster_name = arguments.get("cluster_name")
+                    search_paths = arguments.get("search_paths")
+                    max_age_days = arguments.get("max_age_days", 7)
+                    
+                    try:
+                        results = self.k8s_manager.check_core_files(cluster_name, search_paths, max_age_days)
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No core files found on any nodes")]
+                        
+                        output_lines = [f"Core Files Check Results (showing files from last {max_age_days} days)"]
+                        output_lines.append("=" * 60)
+                        
+                        total_core_files = 0
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            node = result.get("node", "unknown")
+                            core_files = result.get("core_files", [])
+                            error = result.get("error")
+                            
+                            output_lines.append(f"\nCluster: {cluster}")
+                            output_lines.append(f"Node: {node}")
+                            
+                            if error:
+                                output_lines.append(f"Error: {error}")
+                            elif core_files:
+                                output_lines.append(f"Core files found ({len(core_files)}):")
+                                for core_file in core_files:
+                                    total_core_files += 1
+                                    output_lines.append(f"  - {core_file['path']}")
+                                    output_lines.append(f"    Size: {core_file['size']}")
+                                    output_lines.append(f"    Modified: {core_file['modified']}")
+                                    output_lines.append(f"    Age: {core_file['age_days']} days")
+                            else:
+                                output_lines.append("No core files found")
+                            output_lines.append("-" * 40)
+                        
+                        output_lines.insert(1, f"Total core files found: {total_core_files}")
+                        output_lines.insert(2, "=" * 60)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error checking core files: {str(e)}")]
                 
                 else:
                     raise ValueError(f"Unknown tool: {name}")

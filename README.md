@@ -267,6 +267,15 @@ This server implements the Model Context Protocol over HTTP and supports:
    - Parameters: `command` (string), `cluster_name` (optional string) - executes on all clusters if not specified
    - Example Commands: `show route`, `show bgp summary`, `show interfaces terse`
 
+### 8. **check_core_files**
+   - Description: Check for core files on nodes in a Kubernetes cluster. Searches common locations for core dumps
+   - Parameters: 
+     - `cluster_name` (optional string) - Name of the cluster (checks all clusters if not specified)
+     - `search_paths` (optional array) - Custom paths to search for core files (uses default paths if not specified)
+     - `max_age_days` (optional integer) - Maximum age of core files to report in days (default: 7 days)
+   - Default Search Paths: `/tmp`, `/var/tmp`, `/cores`, `/var/cores`, `/var/crash`, `/var/log`, `/home`, `/root`
+   - Use Cases: Debugging crashes, system monitoring, troubleshooting application failures
+
 ## Kubernetes Integration
 
 The server supports multiple Kubernetes clusters configured via a JSON file. Clusters can be accessed directly via kubeconfig files or through SSH tunnels for remote access.
