@@ -1,0 +1,87 @@
+{
+  "basic-cluster": {
+    "kubeconfig_path": "/home/user/.kube/basic-cluster-config",
+    "description": "Basic Kubernetes cluster - minimal configuration (only basic operations available)"
+  },
+  "production": {
+    "kubeconfig_path": "/home/user/.kube/prod-cluster-config",
+    "description": "Production Kubernetes cluster - pod commands only",
+    "pod_command_list": "/home/user/prod-pod-commands.json"
+  },
+  "staging": {
+    "kubeconfig_path": "/home/user/.kube/staging-cluster-config",
+    "description": "Staging environment - no command lists (basic operations only)"
+  },
+  "development": {
+    "kubeconfig_path": "/home/user/.kube/dev-cluster-config",
+    "description": "Development cluster - full JCNR and pod command support",
+    "jcnr_command_list": "/home/user/dev-jcnr-commands.json",
+    "pod_command_list": "/home/user/dev-pod-commands.json"
+  },
+  "jcnr3-cluster": {
+    "kubeconfig_path": "/app/kubeconfigs/jcnr3-kubeconfig",
+    "description": "JCNR3 Kubernetes cluster - full JCNR support",
+    "jcnr_command_list": "/home/user/jcnr3-specific-commands.json",
+    "pod_command_list": "/home/user/jcnr-pod-commands.json"
+  },
+  "jcnr2-cluster": {
+    "kubeconfig_path": "/home/jcnr2/.kube/config",
+    "description": "JCNR2 Kubernetes cluster - JCNR summary only", 
+    "jcnr_command_list": "/home/user/jcnr2-commands.json"
+  },
+  "jcnr4-cluster": {
+    "kubeconfig_path": "/home/jcnr4/.kube/config",
+    "description": "JCNR4 Kubernetes cluster - comprehensive monitoring",
+    "jcnr_command_list": "/home/user/jcnr4-extended-commands.json",
+    "pod_command_list": "/home/user/jcnr4-pod-diagnostics.json"
+  },
+  "edge-cluster-west": {
+    "kubeconfig_path": "/etc/kubernetes/edge-west-config",
+    "description": "Edge computing cluster - West Coast (lightweight pod monitoring)",
+    "pod_command_list": "/home/user/edge-pod-commands.json"
+  },
+  "edge-cluster-east": {
+    "kubeconfig_path": "/etc/kubernetes/edge-east-config",
+    "description": "Edge computing cluster - East Coast (JCNR enabled edge)",
+    "jcnr_command_list": "/home/user/edge-jcnr-commands.json",
+    "pod_command_list": "/home/user/edge-pod-commands.json"
+  },
+  "legacy-cluster": {
+    "kubeconfig_path": "/home/user/.kube/legacy-config",
+    "description": "Legacy cluster - custom pod commands only",
+    "pod_command_list": "/home/user/legacy-maintenance-commands.json"
+  },
+  "remote-cluster-ssh": {
+    "kubeconfig_path": "/home/user/.kube/remote-cluster-config",
+    "description": "Remote cluster accessed via SSH tunnel - full capabilities",
+    "jcnr_command_list": "/home/user/remote-jcnr-commands.json",
+    "pod_command_list": "/home/user/remote-pod-commands.json",
+    "ssh": {
+      "host": "jump-host.example.com",
+      "port": 22,
+      "username": "ubuntu",
+      "key_path": "/home/user/.ssh/id_rsa",
+      "k8s_host": "10.0.1.100",
+      "k8s_port": 6443,
+      "local_port": 6443
+    }
+  },
+  "test-cluster-no-ssh": {
+    "kubeconfig_path": "/home/user/.kube/test-cluster-config",
+    "description": "Test cluster - SSH config defined but no command lists",
+    "ssh": {
+      "host": "test-jump.example.com",
+      "port": 2222,
+      "username": "testuser",
+      "key_path": "/home/user/.ssh/test_rsa",
+      "k8s_host": "192.168.1.100",
+      "k8s_port": 6443,
+      "local_port": 6444
+    }
+  },
+  "monitoring-cluster": {
+    "kubeconfig_path": "/opt/k8s/monitoring-config",
+    "description": "Monitoring cluster - specialized pod diagnostics only",
+    "pod_command_list": "/opt/monitoring/specialized-diagnostics.json"
+  }
+}

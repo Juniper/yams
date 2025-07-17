@@ -11,7 +11,7 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
 - **Multi-cluster Management**: Connect to multiple Kubernetes clusters simultaneously
 - **Flexible Access Methods**: Direct kubeconfig access or SSH tunnel connections for remote clusters
 - **Generic Kubernetes Operations**: List clusters, namespaces, pods, and execute commands in any pod
-- **JCNR-Specific Tools**: Specialized commands for DPDK, Contrail Agent, and cRPD components
+- **JCNR-Specific Analysis**: Deep visibility with CLI commands and HTTP API integration. Correlate data from commands to give a usable summary of JCNR state.
 - **VS Code Integration**: Native support for VS Code Copilot Chat and other MCP clients
 
 ### Use Cases
@@ -25,8 +25,18 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
 - HTTP-based MCP server using FastAPI
 - Kubernetes integration with kubeconfig support
 - SSH tunnel support for remote cluster access
-- Generic Tools: `list_clusters`, `list_namespaces`, `list_pods`, `execute_command`
-- Specialized JCNR Tools: `execute_dpdk_command`, `execute_agent_command`, `execute_crpd_command`, `check_core_files`, `analyze_logs`
+- **Generic Tools**: `list_clusters`, `list_namespaces`, `list_pods`, `execute_command`, `pod_command_and_summary`
+- **JCNR-Specific Tools**: 
+  - `execute_dpdk_command` - DPDK datapath commands (vrdpdk pods)
+  - `execute_agent_command` - Contrail Agent commands (vrouter-nodes pods)
+  - `execute_junos_cli_commands` - cRPD and cSRX routing commands (jcnr namespace)
+  - `jcnr_summary` - **Comprehensive JCNR datapath analysis with CLI + HTTP API correlation**
+- **Operations Tools**: `check_core_files`, `analyze_logs`
+- **Advanced Features**:
+  - Configurable command lists via JSON files
+  - XML-to-table formatting for Sandesh HTTP API responses
+  - Multi-cluster datapath correlation analysis
+  - Automated JCNR component discovery
 - VS Code Copilot Chat compatible
 - CORS support and health check endpoint
 
@@ -49,13 +59,13 @@ Create a `clusters.json` file with your cluster configurations. Each cluster is 
   - *Example*: `"Production JCNR cluster"`, `"Development environment"`
   - *Purpose*: Documentation and identification in logs and UI
 
-- **`environment`**: Environment classification
-  - *Example*: `"production"`, `"staging"`, `"development"`, `"test"`
-  - *Purpose*: Logical grouping and environment-specific handling
+- **`pod_command_list`**: Path to JSON file containing commands for pod diagnostics
+  - *Example*: `"pod-command-list.json"`
+  - *Purpose*: Used by `pod_command_and_summary` tool for running diagnostic commands
 
-- **`location`**: Physical or logical location identifier
-  - *Example*: `"us-east-1"`, `"on-premises"`, `"datacenter-a"`
-  - *Purpose*: Geographic or infrastructure location reference
+- **`jcnr_command_list`**: Path to JSON file containing JCNR datapath commands  
+  - *Example*: `"jcnr-command-list.json"`
+  - *Purpose*: Used by `jcnr_summary` tool for comprehensive datapath analysis
 
 - **`ssh`**: SSH tunnel configuration object (see SSH Configuration Options below)
   - *Purpose*: Required when cluster is not directly accessible and needs SSH tunneling
@@ -66,8 +76,8 @@ Create a `clusters.json` file with your cluster configurations. Each cluster is 
   "cluster-name": {
     "kubeconfig_path": "path/to/kubeconfig",
     "description": "Optional description",
-    "environment": "optional-environment",
-    "location": "optional-location", 
+    "pod_command_list": "path/to/pod-command-list.json",
+    "jcnr_command_list": "path/to/jcnr-command-list.json",
     "ssh": {
       // SSH configuration (optional, see SSH section below)
     }
@@ -81,14 +91,13 @@ Create a `clusters.json` file with your cluster configurations. Each cluster is 
   "production": {
     "kubeconfig_path": "/home/user/.kube/prod-cluster-config",
     "description": "Production Kubernetes cluster",
-    "environment": "production",
-    "location": "us-east-1"
+    "pod_command_list": "pod-command-list.json",
+    "jcnr_command_list": "jcnr-command-list.json"
   },
   "staging": {
     "kubeconfig_path": "/home/user/.kube/staging-cluster-config", 
     "description": "Staging environment for testing",
-    "environment": "staging",
-    "location": "us-west-2"
+    "pod_command_list": "pod-command-list.json"
   },
   "local": {
     "kubeconfig_path": "~/.kube/config",
@@ -262,10 +271,10 @@ This server implements the Model Context Protocol over HTTP and supports:
    - Parameters: `command` (string), `cluster_name` (optional string) - executes on all clusters if not specified
    - Example Commands: `contrail-status`, `vif --list`, `nh --list`
 
-### 7. **execute_crpd_command**
-   - Description: Execute a command in all cRPD (Contrail Routing Protocol Daemon) pods in jcnr namespace across all clusters
+### 7. **execute_junos_cli_commands**
+   - Description: Execute a command in all cRPD (Contrail Routing Protocol Daemon) and cSRX pods in jcnr namespace across all clusters
    - Parameters: `command` (string), `cluster_name` (optional string) - executes on all clusters if not specified
-   - Example Commands: `show route`, `show bgp summary`, `show interfaces terse`
+   - Example Commands: `show route`, `show bgp summary`, `show interfaces terse`, `show security policies`
 
 ### 8. **check_core_files**
    - Description: Check for core files on nodes in a Kubernetes cluster. Searches common locations for core dumps
@@ -278,6 +287,102 @@ This server implements the Model Context Protocol over HTTP and supports:
 
 ### 9. **analyze_logs**
    - Description: Analyze log files in `/var/log/` and `/log/` directories on cluster nodes. Searches for errors, large files, and recent activity
+   - Parameters:
+     - `cluster_name` (optional string) - Name of the cluster (analyzes all clusters if not specified)
+     - `pod_name` (optional string) - Name of a specific pod to analyze logs for
+     - `namespace` (optional string) - Kubernetes namespace of the pod (required if pod_name is specified)
+     - `log_paths` (optional array) - Custom paths to search for log files
+     - `max_age_days` (optional integer) - Maximum age of log files to analyze in days (default: 7)
+     - `max_lines` (optional integer) - Maximum number of lines to return from log analysis (default: 100)
+     - `pattern` (optional string) - Custom regex pattern to search for in logs
+
+### 10. **pod_command_and_summary**
+   - Description: Run a set of commands on a given pod and summarize the outputs with execution statistics. Commands are loaded exclusively from a file referenced in the cluster configuration's 'pod_command_list' field.
+   - Parameters:
+     - `pod_name` (string) - Name of the pod to execute commands on
+     - `namespace` (string) - Kubernetes namespace of the pod
+     - `container` (optional string) - Container name (defaults to first container)
+     - `cluster_name` (optional string) - Name of the cluster
+
+### 11. **jcnr_summary** ⭐ (New JCNR Datapath Analysis Tool)
+   - Description: **Comprehensive JCNR datapath analysis** combining CLI commands and HTTP API data with correlation analysis
+   - Parameters: `cluster_name` (optional string) - Name of the cluster (analyzes all clusters if not specified)
+   - **Key Features**:
+     - **Automated Discovery**: Finds and connects to DPDK pods (vrdpdk) in contrail namespace
+     - **CLI Commands**: Executes comprehensive datapath commands (nh, vif, rt, frr, mpls, flow)
+     - **HTTP API Integration**: Fetches data from Sandesh HTTP API (port 8085) with XML-to-table formatting
+     - **Correlation Analysis**: Analyzes relationships between next-hops, routes, MPLS labels, and flows
+     - **Configurable Commands**: Uses JSON configuration files for customizable command/endpoint lists
+     - **Enhanced Output**: Structured tables, summary statistics, and detailed analysis
+
+## JCNR-Specific Features
+
+YAMS provides specialized tools for **Juniper Cloud-Native Router (JCNR)** deployments, offering deep visibility into datapath operations and network state.
+
+### JCNR Analysis
+
+The `jcnr_summary` tool provides comprehensive analysis of JCNR components from datapath
+utilities to vRouter Agent insights. 
+
+#### **Configuration Management:**
+JCNR commands and endpoints are configurable via JSON files:
+
+```json
+{
+  "datapath_commands": [
+    "nh --list",
+    "vif --list", 
+    "rt --dump 0",
+    "frr --dump",
+    "mpls --dump",
+    "flow -l"
+  ],
+  "http_endpoints": {
+    "nh_list": "Snh_NhListReq?type=&nh_index=&policy_enabled=",
+    "vrf_list": "Snh_VrfListReq?name=",
+    "inet4_routes": "Snh_Inet4UcRouteReq?x=0",
+    "interface_list": "Snh_ItfReq?name=",
+    "flow_list": "Snh_FetchFlowRecord?x=0"
+  },
+  "http_port": 8085,
+  "analysis_config": {
+    "max_display_lines": 50,
+    "max_table_rows": 20,
+    "max_http_display_chars": 5000,
+    "enable_detailed_analysis": true,
+    "truncate_large_outputs": true
+  }
+}
+```
+
+### JCNR Component Access
+
+#### **DPDK Pods (vrdpdk)**
+- **Purpose**: User-space datapath processing
+- **Commands**: `vif --list`, `nh --list`, `rt --dump`, `dropstats`
+- **Location**: `contrail` namespace
+- **Tool**: `execute_dpdk_command`
+
+#### **Contrail Agent Pods (vrouter-nodes)**
+- **Purpose**: Control plane agent for datapath programming
+- **Commands**: `contrail-status`, `vif --list`, `nh --list`
+- **Location**: `contrail` namespace  
+- **Tool**: `execute_agent_command`
+
+#### **cRPD Pods (Contrail Routing Protocol Daemon)**
+- **Purpose**: BGP/MPLS control plane routing
+- **Commands**: `show route`, `show bgp summary`, `show interfaces`
+- **Location**: `jcnr` namespace
+- **Tool**: `execute_junos_cli_commands`
+- **Note**: Commands are automatically formatted for Junos CLI (`cli -c 'command'`)
+
+### JCNR Use Cases
+
+- **Performance Analysis**: Monitor interface statistics, flow processing, packet drops
+- **Routing Verification**: Validate route installation across IPv4/IPv6 tables
+- **Datapath Debugging**: Correlate next-hops, routes, and flows for troubleshooting
+- **Multi-cluster Monitoring**: Compare configurations across JCNR deployments
+- **Operational Health**: Check core files, analyze logs, verify component status
 
 ## Kubernetes Integration
 
@@ -397,20 +502,19 @@ When configuring SSH tunnel access, include an `ssh` object within your cluster 
   "production": {
     "kubeconfig_path": "/home/user/.kube/prod-cluster-config",
     "description": "Production Kubernetes cluster (direct access)",
-    "environment": "production",
-    "location": "us-east-1"
+    "pod_command_list": "pod-command-list.json",
+    "jcnr_command_list": "jcnr-command-list.json"
   },
   "staging": {
     "kubeconfig_path": "/home/user/.kube/staging-cluster-config", 
     "description": "Staging environment (direct access)",
-    "environment": "staging",
-    "location": "us-west-2"
+    "pod_command_list": "pod-command-list.json"
   },
   "remote-prod": {
     "kubeconfig_path": "/home/user/.kube/remote-prod-config",
     "description": "Remote production cluster via SSH tunnel",
-    "environment": "production",
-    "location": "on-premises",
+    "pod_command_list": "pod-command-list.json",
+    "jcnr_command_list": "jcnr-command-list.json",
     "ssh": {
       "host": "bastion.company.com",
       "username": "kubectl-user",
@@ -423,7 +527,7 @@ When configuring SSH tunnel access, include an `ssh` object within your cluster 
   "dev-cluster": {
     "kubeconfig_path": "/home/user/.kube/dev-config",
     "description": "Development cluster via SSH (password auth)",
-    "environment": "development",
+    "pod_command_list": "pod-command-list.json",
     "ssh": {
       "host": "dev-jump.lab.local",
       "username": "developer",

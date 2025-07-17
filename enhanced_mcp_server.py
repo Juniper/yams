@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import tempfile
+import time
+import xml.etree.ElementTree as ET
 import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
@@ -40,6 +42,13 @@ try:
 except ImportError:
     SSH_AVAILABLE = False
     print("Warning: SSH libraries not available. Install with: pip install paramiko sshtunnel")
+
+try:
+    import requests
+    HTTP_AVAILABLE = True
+except ImportError:
+    HTTP_AVAILABLE = False
+    print("Warning: requests library not available. Install with: pip install requests")
 
 
 
@@ -265,6 +274,75 @@ class KubernetesManager:
             logger.error(f"Failed to create tunneled kubeconfig for {cluster_name}: {e}")
             raise Exception(f"Tunneled kubeconfig creation failed: {str(e)}")
     
+    def load_jcnr_command_list(self, cluster_name: str = None) -> Dict[str, Any]:
+        """Load JCNR command list configuration for the specified cluster.
+        
+        This method now requires a jcnr_command_list file to be configured in the cluster config.
+        No default commands are provided - configuration must be explicit.
+        
+        Supports two formats:
+        1. Simple array: ["cmd1", "cmd2", ...] - converted to full structure
+        2. Full object: {"datapath_commands": [...], "http_endpoints": {...}, ...}
+        """
+        try:
+            # Require cluster name to be specified
+            if not cluster_name:
+                raise Exception("Cluster name is required for JCNR summary. No default configuration available.")
+            
+            # Require cluster to exist in configuration
+            if cluster_name not in self.clusters_config:
+                raise Exception(f"Cluster '{cluster_name}' not found in configuration")
+            
+            cluster_config = self.clusters_config[cluster_name]
+            command_list_path = cluster_config.get("jcnr_command_list")
+            
+            # Require jcnr_command_list to be configured
+            if not command_list_path:
+                raise Exception(f"No jcnr_command_list configured for cluster '{cluster_name}'. This field is required for jcnr_summary tool.")
+            
+            # Require the file to exist
+            if not os.path.exists(command_list_path):
+                raise Exception(f"JCNR command list file not found for cluster {cluster_name}: {command_list_path}")
+            
+            with open(command_list_path, 'r') as f:
+                data = json.load(f)
+            
+            # Handle different formats
+            if isinstance(data, list):
+                # Simple array format - convert to full structure
+                command_config = {
+                    "datapath_commands": data,
+                    "http_endpoints": {
+                        "nh_list": "Snh_NhListReq?type=&nh_index=&policy_enabled=",
+                        "vrf_list": "Snh_VrfListReq?name=",
+                        "inet4_routes": "Snh_Inet4UcRouteReq?x=0"
+                    },
+                    "http_port": 8085,
+                    "analysis_config": {
+                        "max_display_lines": 50,
+                        "max_http_display_chars": 5000,
+                        "enable_detailed_analysis": True,
+                        "truncate_large_outputs": True
+                    }
+                }
+            elif isinstance(data, dict):
+                # Full object format - use as-is but ensure required fields
+                command_config = data
+                if "datapath_commands" not in command_config:
+                    raise Exception(f"JCNR command file missing 'datapath_commands' field: {command_list_path}")
+            else:
+                raise Exception(f"Invalid JCNR command file format. Expected list or object, got {type(data)}: {command_list_path}")
+                
+            logger.info(f"Loaded JCNR command list for cluster {cluster_name} from {command_list_path}")
+            return command_config
+            
+        except Exception as e:
+            logger.error(f"Failed to load JCNR command list for cluster {cluster_name}: {e}")
+            # Re-raise the exception instead of returning defaults
+            raise e
+    
+
+
     def list_clusters(self) -> List[Dict[str, str]]:
         """List all configured clusters."""
         clusters = []
@@ -358,7 +436,15 @@ class KubernetesManager:
                 raise Exception(f"No containers found in pod '{pod_name}'")
             
             # Prepare command for execution
-            cmd = command.split() if isinstance(command, str) else command
+            if isinstance(command, str):
+                # Special handling for cRPD CLI commands
+                if namespace == "jcnr" and "crpd" in pod_name.lower() and command.startswith("cli "):
+                    # Use a shell to preserve the entire command as a single unit for cRPD
+                    cmd = ["sh", "-c", command]
+                else:
+                    cmd = command.split()
+            else:
+                cmd = command
             
             # Execute command
             try:
@@ -481,31 +567,48 @@ class KubernetesManager:
         
         return results
     
-    def execute_crpd_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
-        """Execute a command in all cRPD pods in jcnr namespace."""
+    def execute_junos_cli_commands(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
+        """Execute a command in all cRPD and cSRX pods in jcnr namespace.
+        Automatically prepends 'cli -c' to commands for proper Junos CLI execution."""
         results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        # If command doesn't start with cli -c, prepend it
+        if not command.startswith("cli -c") and not command.startswith("cli -C"):
+            # Strip any existing "cli " prefix if it exists
+            if command.startswith("cli "):
+                command = command[4:].strip()
+            # Format the command properly for Junos CLI
+            command = f"cli -c '{command}'"
         
         for cluster in clusters_to_check:
             try:
                 # Get pods in jcnr namespace
                 pods = self.list_pods("jcnr", cluster)
-                crpd_pods = [pod for pod in pods if "crpd" in pod["name"].lower()]
+                # Look for both cRPD and cSRX pods
+                junos_pods = [pod for pod in pods if any(pod_type in pod["name"].lower() for pod_type in ["crpd", "csrx"])]
                 
-                for pod in crpd_pods:
+                for pod in junos_pods:
                     try:
                         result = self.execute_pod_command(
                             pod["name"], "jcnr", command, None, cluster
                         )
-                        result["pod_type"] = "cRPD"
+                        # Determine pod type based on name
+                        if "crpd" in pod["name"].lower():
+                            result["pod_type"] = "cRPD"
+                        elif "csrx" in pod["name"].lower():
+                            result["pod_type"] = "cSRX"
+                        else:
+                            result["pod_type"] = "Junos"
                         results.append(result)
                     except Exception as e:
+                        pod_type = "cRPD" if "crpd" in pod["name"].lower() else ("cSRX" if "csrx" in pod["name"].lower() else "Junos")
                         results.append({
                             "pod": pod["name"],
                             "namespace": "jcnr",
                             "command": command,
                             "cluster": cluster,
-                            "pod_type": "cRPD",
+                            "pod_type": pod_type,
                             "output": f"Failed to execute command: {str(e)}",
                             "status": "error"
                         })
@@ -515,10 +618,12 @@ class KubernetesManager:
                     "cluster": cluster,
                     "namespace": "jcnr",
                     "command": command,
-                    "pod_type": "cRPD",
+                    "pod_type": "Junos",
                     "output": f"Failed to access cluster: {str(e)}",
                     "status": "error"
                 })
+        
+        return results
         
         return results
     
@@ -657,7 +762,7 @@ class KubernetesManager:
     def analyze_logs(self, cluster_name: str = None, pod_name: str = None, namespace: str = None, 
                     log_paths: List[str] = None, max_age_days: int = 7, max_lines: int = 100, 
                     pattern: str = None) -> List[Dict[str, Any]]:
-        """Analyze log files in /var/log/ and /log/ directories in specific pods or cluster nodes."""
+        """Analyze log files in /var/log/ and /log/ directories, with enhanced JCNR log support for DPDK pods."""
         results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
         
@@ -675,6 +780,16 @@ class KubernetesManager:
             "/var/log/jcnr"
         ]
         
+        # Enhanced JCNR log paths for DPDK pods
+        jcnr_log_paths = [
+            "/var/log/jcnr/contrail-vrouter*",
+            "/var/log/jcnr/jcnr*", 
+            "/var/log/jcnr/messages",
+            "/var/log/jcnr",
+            "/var/log/contrail-vrouter*",
+            "/var/log/jcnr*"
+        ]
+        
         paths_to_search = log_paths if log_paths else default_log_paths
         
         for cluster in clusters_to_check:
@@ -689,16 +804,23 @@ class KubernetesManager:
                         # Get the specific pod
                         pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
                         
+                        # Check if this is a DPDK pod and enhance log paths accordingly
+                        is_dpdk_pod = self._is_dpdk_pod(pod)
+                        enhanced_paths = paths_to_search.copy()
+                        if is_dpdk_pod:
+                            enhanced_paths.extend(jcnr_log_paths)
+                        
                         # Analyze logs for this specific pod
-                        log_analysis = self._analyze_pod_logs(pod, cluster, paths_to_search, pattern, max_lines)
+                        log_analysis = self._analyze_pod_logs(pod, cluster, enhanced_paths, pattern, max_lines, is_dpdk_pod)
                         
                         results.append({
                             "cluster": cluster,
                             "pod": pod_name,
                             "namespace": namespace,
                             "node": pod.spec.node_name,
+                            "pod_type": "DPDK" if is_dpdk_pod else "Standard",
                             "log_analysis": log_analysis,
-                            "search_paths": paths_to_search,
+                            "search_paths": enhanced_paths,
                             "pattern_used": pattern or "error|fail|panic|segfault|oops|bug|critical|fatal"
                         })
                         
@@ -722,13 +844,20 @@ class KubernetesManager:
                             
                             # Look for privileged pods or system pods that can access host filesystem
                             suitable_pods = []
+                            dpdk_pods = []
                             for pod in pods.items:
+                                is_dpdk = self._is_dpdk_pod(pod)
+                                if is_dpdk:
+                                    dpdk_pods.append(pod)
                                 if (pod.metadata.namespace in ["kube-system", "contrail", "jcnr"] or
                                     any("system" in container.name or "node" in container.name 
                                         for container in pod.spec.containers)):
                                     suitable_pods.append(pod)
                             
-                            if not suitable_pods:
+                            # Prefer DPDK pods for JCNR log analysis, fallback to suitable pods
+                            target_pod = dpdk_pods[0] if dpdk_pods else (suitable_pods[0] if suitable_pods else None)
+                            
+                            if not target_pod:
                                 results.append({
                                     "cluster": cluster,
                                     "node": node_name,
@@ -737,18 +866,22 @@ class KubernetesManager:
                                 })
                                 continue
                             
-                            # Use the first suitable pod
-                            pod = suitable_pods[0]
+                            # Enhance log paths if using DPDK pod
+                            is_dpdk_pod = target_pod in dpdk_pods
+                            enhanced_paths = paths_to_search.copy()
+                            if is_dpdk_pod:
+                                enhanced_paths.extend(jcnr_log_paths)
                             
                             # Analyze logs for this node via the pod
-                            log_analysis = self._analyze_pod_logs(pod, cluster, paths_to_search, pattern, max_lines)
+                            log_analysis = self._analyze_pod_logs(target_pod, cluster, enhanced_paths, pattern, max_lines, is_dpdk_pod)
                             
                             results.append({
                                 "cluster": cluster,
                                 "node": node_name,
+                                "pod_type": "DPDK" if is_dpdk_pod else "Standard",
                                 "log_analysis": log_analysis,
-                                "search_paths": paths_to_search,
-                                "pod_used": f"{pod.metadata.namespace}/{pod.metadata.name}",
+                                "search_paths": enhanced_paths,
+                                "pod_used": f"{target_pod.metadata.namespace}/{target_pod.metadata.name}",
                                 "pattern_used": pattern or "error|fail|panic|segfault|oops|bug|critical|fatal"
                             })
                             
@@ -769,15 +902,213 @@ class KubernetesManager:
         
         return results
     
-    def _analyze_pod_logs(self, pod, cluster: str, paths_to_search: List[str], pattern: str, max_lines: int) -> Dict[str, Any]:
-        """Helper method to analyze logs within a specific pod."""
+    def _is_dpdk_pod(self, pod) -> bool:
+        """Check if a pod is a DPDK pod based on its name and containers."""
+        pod_name = pod.metadata.name.lower()
+        namespace = pod.metadata.namespace.lower()
+        
+        # Check pod name patterns
+        if ("vrdpdk" in pod_name or "vrouter-nodes-vrdpdk" in pod_name or 
+            "contrail-vrouter" in pod_name and "dpdk" in pod_name):
+            return True
+            
+        # Check if running in contrail namespace with DPDK containers
+        if namespace == "contrail":
+            for container in pod.spec.containers:
+                container_name = container.name.lower()
+                if ("dpdk" in container_name or "vrdpdk" in container_name):
+                    return True
+                    
+        return False
+    
+    def pod_command_and_summary(self, pod_name: str, namespace: str, 
+                                   container: str = None, cluster_name: str = None) -> Dict[str, Any]:
+        """Run a set of commands on a pod and summarize the outputs with execution statistics.
+        
+        Commands are loaded exclusively from a file referenced in the cluster configuration's 
+        'pod_command_list' field. This tool only runs if the cluster config has this field.
+        """
+        import time
+        
+        result = {
+            "pod": pod_name,
+            "namespace": namespace,
+            "container": container,
+            "cluster": cluster_name or "default",
+            "commands_executed": 0,
+            "commands_successful": 0,
+            "commands_failed": 0,
+            "results": [],
+            "total_output_size_bytes": 0,
+            "estimated_execution_time": "Unknown",
+            "command_source": "unknown"
+        }
+        
+        # Only load commands from cluster configuration's pod_command_list field
+        try:
+            cluster_config = self.clusters_config.get(cluster_name, {}) if cluster_name else {}
+            command_list_path = cluster_config.get("pod_command_list")
+            
+            if not command_list_path:
+                result["error"] = f"No pod_command_list configured for cluster '{cluster_name}'. This tool requires a pod_command_list field in the cluster configuration."
+                return result
+                
+            final_commands = self._load_commands_from_file(command_list_path)
+            result["command_source"] = f"cluster_config: {command_list_path}"
+            
+        except Exception as e:
+            result["error"] = f"Failed to load commands from cluster configuration: {str(e)}"
+            return result
+        
+        if not final_commands:
+            result["error"] = f"No commands found in file: {command_list_path}"
+            return result
+        
+        result["commands_to_execute"] = final_commands
+        start_time = time.time()
+        
+        try:
+            for i, command in enumerate(final_commands, 1):
+                cmd_result = {
+                    "command_number": i,
+                    "command": command,
+                    "status": "unknown",
+                    "output_size_bytes": 0,
+                    "output_lines": 0,
+                    "output_preview": {}
+                }
+                
+                try:
+                    # Execute the command
+                    response = self.execute_pod_command(pod_name, namespace, command, container, cluster_name)
+                    
+                    result["commands_executed"] += 1
+                    
+                    if response.get("status") == "success":
+                        result["commands_successful"] += 1
+                        cmd_result["status"] = "success"
+                        
+                        output = response.get("output", "")
+                        cmd_result["output_size_bytes"] = len(output.encode('utf-8'))
+                        result["total_output_size_bytes"] += cmd_result["output_size_bytes"]
+                        
+                        # Count lines and create preview
+                        lines = output.strip().split('\n') if output.strip() else []
+                        cmd_result["output_lines"] = len(lines)
+                        
+                        # Create output preview
+                        if lines:
+                            if len(lines) <= 3:
+                                cmd_result["output_preview"]["content"] = output.strip()
+                            else:
+                                cmd_result["output_preview"]["first_line"] = lines[0] if lines else ""
+                                cmd_result["output_preview"]["last_line"] = lines[-1] if lines else ""
+                                cmd_result["output_preview"]["total_lines"] = len(lines)
+                            cmd_result["full_output_available"] = len(lines) > 3
+                        
+                    else:
+                        result["commands_failed"] += 1
+                        cmd_result["status"] = "failed"
+                        cmd_result["error"] = response.get("output", "Unknown error")
+                        
+                except Exception as e:
+                    result["commands_failed"] += 1
+                    cmd_result["status"] = "error" 
+                    cmd_result["error"] = str(e)
+                
+                result["results"].append(cmd_result)
+            
+            # Calculate execution time and success rate
+            end_time = time.time()
+            execution_time = end_time - start_time
+            result["estimated_execution_time"] = f"{execution_time:.2f} seconds"
+            
+            if result["commands_executed"] > 0:
+                success_rate = (result["commands_successful"] / result["commands_executed"]) * 100
+                result["success_rate"] = f"{success_rate:.1f}%"
+            else:
+                result["success_rate"] = "0%"
+                
+        except Exception as e:
+            result["error"] = f"Failed to execute commands: {str(e)}"
+        
+        return result
+
+    def _load_commands_from_file(self, file_path: str) -> List[str]:
+        """Load commands from a JSON file containing either:
+        1. A simple list of command strings: ["cmd1", "cmd2", ...]
+        2. An object with description and commands: {"description": "...", "commands": ["cmd1", "cmd2", ...]}
+        3. A list of objects with command/description: [{"command": "cmd", "description": "desc"}, ...]
+        
+        Args:
+            file_path: Path to the JSON file containing the command list
+            
+        Returns:
+            List of command strings
+            
+        Raises:
+            Exception: If file cannot be read or parsed
+        """
+        try:
+            # Handle relative paths - make them relative to the current working directory
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(os.getcwd(), file_path)
+            
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+            
+            commands = []
+            
+            if isinstance(data, list):
+                # Handle list format (legacy or enhanced)
+                for item in data:
+                    if isinstance(item, str):
+                        # Simple string format
+                        commands.append(item)
+                    elif isinstance(item, dict) and 'command' in item:
+                        # Object format with command and description
+                        commands.append(str(item['command']))
+                    else:
+                        raise ValueError(f"Invalid command format: {item}")
+            
+            elif isinstance(data, dict):
+                # Handle object format with description and commands array
+                if 'commands' in data:
+                    command_list = data['commands']
+                    if isinstance(command_list, list):
+                        commands = [str(cmd) for cmd in command_list if cmd]
+                    else:
+                        raise ValueError(f"'commands' field must be a list, got {type(command_list)}")
+                else:
+                    raise ValueError("Object format must contain 'commands' field")
+            
+            else:
+                raise ValueError(f"Expected a list or object with commands, got {type(data)}")
+            
+            # Filter out empty commands
+            commands = [cmd.strip() for cmd in commands if cmd and cmd.strip()]
+            return commands
+                
+        except FileNotFoundError:
+            raise Exception(f"Command file not found: {file_path}")
+        except json.JSONDecodeError as e:
+            raise Exception(f"Invalid JSON in command file {file_path}: {str(e)}")
+        except Exception as e:
+            raise Exception(f"Error loading commands from {file_path}: {str(e)}")
+
+    def _analyze_pod_logs(self, pod, cluster: str, paths_to_search: List[str], pattern: str, max_lines: int, is_dpdk_pod: bool = False) -> Dict[str, Any]:
+        """Helper method to analyze logs within a specific pod, with enhanced JCNR support for DPDK pods."""
         log_analysis = {}
         
-        # 1. List recent log files  
+        # Enhanced JCNR log analysis for DPDK pods
+        if is_dpdk_pod:
+            log_analysis.update(self._analyze_jcnr_logs(pod, cluster, pattern, max_lines))
+        
+        # 1. List recent log files recursively including subdirectories (use ls instead of find)
         recent_logs_result = self.execute_pod_command(
             pod.metadata.name, 
             pod.metadata.namespace, 
-            ["sh", "-c", "ls /var/log/"], 
+            ["sh", "-c", "ls /var/log/*.log /var/log/*/*.log /var/log/messages* /var/log/*/messages* 2>/dev/null | head -20"], 
             None, 
             cluster
         )
@@ -788,13 +1119,13 @@ class KubernetesManager:
         else:
             log_analysis["recent_log_files"] = []
         
-        # 2. Check for errors in recent logs
+        # 2. Check for errors in recent logs - use direct grep on known paths
         if pattern:
-            # Use custom pattern
+            # Use custom pattern - search in main log files and contrail subdirectory
             error_result = self.execute_pod_command(
                 pod.metadata.name, 
                 pod.metadata.namespace, 
-                ["sh", "-c", f"grep -i '{pattern}' /var/log/* 2>/dev/null || echo 'No matches found'"], 
+                ["sh", "-c", f"grep -i '{pattern}' /var/log/*.log /var/log/contrail/*.log /var/log/messages* /var/log/contrail/messages* 2>/dev/null | head -50 || echo 'No matches found'"], 
                 None, 
                 cluster
             )
@@ -803,7 +1134,7 @@ class KubernetesManager:
             error_result = self.execute_pod_command(
                 pod.metadata.name, 
                 pod.metadata.namespace, 
-                ["sh", "-c", "grep -i 'error' /var/log/* 2>/dev/null || echo 'No error patterns found'"], 
+                ["sh", "-c", "grep -i -E 'error|fail|panic|warning|critical' /var/log/*.log /var/log/contrail/*.log /var/log/messages* /var/log/contrail/messages* 2>/dev/null | head -50 || echo 'No error patterns found'"], 
                 None, 
                 cluster
             )
@@ -814,11 +1145,11 @@ class KubernetesManager:
         else:
             log_analysis["error_patterns"] = []
         
-        # 3. Get disk usage of log directories
+        # 3. Get disk usage of log directories including subdirectories
         du_result = self.execute_pod_command(
             pod.metadata.name, 
             pod.metadata.namespace, 
-            ["sh", "-c", "ls -la /var/log/"], 
+            ["sh", "-c", "ls -la /var/log/ && echo '--- /var/log/contrail ---' && ls -la /var/log/contrail/ 2>/dev/null || echo 'No contrail logs'"], 
             None, 
             cluster
         )
@@ -829,11 +1160,11 @@ class KubernetesManager:
         else:
             log_analysis["log_directory_listing"] = []
         
-        # 4. Check for large log files - simplified check
+        # 4. Check for large log files - use ls with size check
         large_files_result = self.execute_pod_command(
             pod.metadata.name, 
             pod.metadata.namespace, 
-            ["sh", "-c", "ls -la /var/log/* 2>/dev/null || echo 'Log files not accessible'"], 
+            ["sh", "-c", "ls -lh /var/log/*.log /var/log/contrail/*.log 2>/dev/null | grep -E '[0-9]+M|[0-9]+G' | head -10 || echo 'No large log files found'"], 
             None, 
             cluster
         )
@@ -860,6 +1191,316 @@ class KubernetesManager:
             log_analysis["recent_messages"] = []
         
         return log_analysis
+    
+    def _analyze_jcnr_logs(self, pod, cluster: str, pattern: str, max_lines: int) -> Dict[str, Any]:
+        """Enhanced JCNR log analysis for DPDK pods."""
+        jcnr_analysis = {}
+        
+        # 1. Check for JCNR log directory existence and list contrail logs
+        jcnr_dir_result = self.execute_pod_command(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            ["sh", "-c", "ls -la /var/log/jcnr/ 2>/dev/null || (ls -la /var/log/contrail/ 2>/dev/null && echo 'Using /var/log/contrail instead of /var/log/jcnr') || echo 'Neither JCNR nor contrail log directory found'"],
+            None,
+            cluster
+        )
+        
+        if jcnr_dir_result.get("status") == "success":
+            jcnr_analysis["jcnr_log_directory"] = jcnr_dir_result["output"].strip().split('\n')[:20]
+        else:
+            jcnr_analysis["jcnr_log_directory"] = []
+        
+        # 2. Analyze contrail-vrouter logs (check both /var/log/jcnr and /var/log/contrail)
+        vrouter_log_result = self.execute_pod_command(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            ["sh", "-c", f"for file in /var/log/jcnr/contrail-vrouter* /var/log/contrail/contrail-vrouter*; do if [ -f \"$file\" ]; then echo '=== '$file' ==='; tail -{max_lines//3} \"$file\" 2>/dev/null || echo 'Cannot read '$file; fi; done | head -200"],
+            None,
+            cluster
+        )
+        
+        if vrouter_log_result.get("status") == "success" and vrouter_log_result.get("output"):
+            jcnr_analysis["contrail_vrouter_logs"] = vrouter_log_result["output"].strip().split('\n')
+        else:
+            jcnr_analysis["contrail_vrouter_logs"] = []
+        
+        # 3. Analyze JCNR-specific logs (check both directories)
+        jcnr_log_result = self.execute_pod_command(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            ["sh", "-c", f"for file in /var/log/jcnr/jcnr* /var/log/contrail/jcnr*; do if [ -f \"$file\" ]; then echo '=== '$file' ==='; tail -{max_lines//3} \"$file\" 2>/dev/null || echo 'Cannot read '$file; fi; done | head -200"],
+            None,
+            cluster
+        )
+        
+        if jcnr_log_result.get("status") == "success" and jcnr_log_result.get("output"):
+            jcnr_analysis["jcnr_specific_logs"] = jcnr_log_result["output"].strip().split('\n')
+        else:
+            jcnr_analysis["jcnr_specific_logs"] = []
+        
+        # 4. Check JCNR messages file (check both directories)
+        jcnr_messages_result = self.execute_pod_command(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            ["sh", "-c", f"if [ -f /var/log/jcnr/messages ]; then echo '=== /var/log/jcnr/messages ==='; tail -{max_lines//2} /var/log/jcnr/messages 2>/dev/null; elif [ -f /var/log/contrail/messages ]; then echo '=== /var/log/contrail/messages ==='; tail -{max_lines//2} /var/log/contrail/messages 2>/dev/null; else echo 'JCNR/Contrail messages file not found'; fi"],
+            None,
+            cluster
+        )
+        
+        if jcnr_messages_result.get("status") == "success" and jcnr_messages_result.get("output"):
+            jcnr_analysis["jcnr_messages"] = jcnr_messages_result["output"].strip().split('\n')
+        else:
+            jcnr_analysis["jcnr_messages"] = []
+        
+        # 5. Search for JCNR-specific error patterns
+        if pattern:
+            jcnr_pattern = pattern
+        else:
+            # JCNR-specific error patterns
+            jcnr_pattern = "error|fail|panic|segfault|core.*dump|exception|abort|fatal|crash|dpdk.*error|vrouter.*error|contrail.*error"
+        
+        jcnr_error_result = self.execute_pod_command(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            ["sh", "-c", f"grep -i -E '{jcnr_pattern}' /var/log/jcnr/* /var/log/contrail/* 2>/dev/null | head -{max_lines//2} || echo 'No JCNR error patterns found'"],
+            None,
+            cluster
+        )
+        
+        if jcnr_error_result.get("status") == "success" and jcnr_error_result.get("output"):
+            error_lines = [line.strip() for line in jcnr_error_result["output"].strip().split('\n') if line.strip() and "No JCNR error patterns found" not in line]
+            jcnr_analysis["jcnr_error_patterns"] = error_lines
+        else:
+            jcnr_analysis["jcnr_error_patterns"] = []
+        
+        # 6. Get DPDK-specific log information
+        dpdk_log_result = self.execute_pod_command(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            ["sh", "-c", "for file in /var/log/*dpdk* /var/log/*/*dpdk* /var/log/*vrouter* /var/log/*/*vrouter*; do if [ -f \"$file\" ]; then echo \"File: $file Size: $(ls -lh \"$file\" | awk '{print $5}')\"; fi; done | head -10"],
+            None,
+            cluster
+        )
+        
+        if dpdk_log_result.get("status") == "success" and dpdk_log_result.get("output"):
+            jcnr_analysis["dpdk_log_files"] = dpdk_log_result["output"].strip().split('\n')
+        else:
+            jcnr_analysis["dpdk_log_files"] = []
+            
+        return jcnr_analysis
+
+
+class XMLTableFormatter:
+    """Helper class to convert Sandesh XML responses to readable table format."""
+    
+    @staticmethod
+    def parse_nh_list(xml_data: str, max_rows: int = 20) -> str:
+        """Parse next-hop list XML and convert to table format."""
+        try:
+            root = ET.fromstring(xml_data)
+            
+            # Find all NhSandeshData elements
+            nh_elements = root.findall(".//NhSandeshData")
+            
+            if not nh_elements:
+                return "No next-hop data found in XML response"
+            
+            # Create table header
+            table_lines = []
+            table_lines.append("=" * 120)
+            table_lines.append("NEXT-HOP TABLE (HTTP API)")
+            table_lines.append("=" * 120)
+            table_lines.append(f"{'ID':<5} {'Type':<15} {'RefCnt':<8} {'Valid':<6} {'Policy':<8} {'Interface':<15} {'VxLAN':<6}")
+            table_lines.append("-" * 120)
+            
+            # Parse each next-hop entry
+            count = 0
+            for nh in nh_elements[:max_rows]:
+                nh_id = nh.find("nh_index").text if nh.find("nh_index") is not None else "N/A"
+                nh_type = nh.find("type").text if nh.find("type") is not None else "N/A"
+                ref_count = nh.find("ref_count").text if nh.find("ref_count") is not None else "0"
+                valid = "Yes" if nh.find("valid") is not None and nh.find("valid").text == "true" else "No"
+                policy = "Yes" if nh.find("policy") is not None and "enabled" in nh.find("policy").text else "No"
+                interface = nh.find("itf").text if nh.find("itf") is not None else "N/A"
+                vxlan_flag = "Yes" if nh.find("vxlan_flag") is not None and nh.find("vxlan_flag").text == "true" else "No"
+                
+                table_lines.append(f"{nh_id:<5} {nh_type:<15} {ref_count:<8} {valid:<6} {policy:<8} {interface:<15} {vxlan_flag:<6}")
+                count += 1
+            
+            if len(nh_elements) > max_rows:
+                table_lines.append(f"... and {len(nh_elements) - max_rows} more entries (showing first {max_rows})")
+            
+            table_lines.append("-" * 120)
+            table_lines.append(f"Total Next-hops: {len(nh_elements)}")
+            table_lines.append("=" * 120)
+            
+            return "\n".join(table_lines)
+            
+        except Exception as e:
+            return f"Error parsing next-hop XML: {str(e)}"
+    
+    @staticmethod
+    def parse_vrf_list(xml_data: str) -> str:
+        """Parse VRF list XML and convert to table format."""
+        try:
+            root = ET.fromstring(xml_data)
+            
+            # Find all VrfSandeshData elements
+            vrf_elements = root.findall(".//VrfSandeshData")
+            
+            if not vrf_elements:
+                return "No VRF data found in XML response"
+            
+            # Create table header
+            table_lines = []
+            table_lines.append("=" * 100)
+            table_lines.append("VRF TABLE (HTTP API)")
+            table_lines.append("=" * 100)
+            table_lines.append(f"{'Name':<40} {'UC Index':<10} {'L2 Index':<10} {'VxLAN ID':<10} {'RD':<15}")
+            table_lines.append("-" * 100)
+            
+            # Parse each VRF entry
+            for vrf in vrf_elements:
+                name = vrf.find("name").text if vrf.find("name") is not None else "N/A"
+                uc_index = vrf.find("ucindex").text if vrf.find("ucindex") is not None else "N/A"
+                l2_index = vrf.find("l2index").text if vrf.find("l2index") is not None else "N/A"
+                vxlan_id = vrf.find("vxlan_id").text if vrf.find("vxlan_id") is not None else "N/A"
+                rd = vrf.find("RD").text if vrf.find("RD") is not None else "N/A"
+                
+                # Truncate long names
+                if len(name) > 35:
+                    name = name[:32] + "..."
+                
+                table_lines.append(f"{name:<40} {uc_index:<10} {l2_index:<10} {vxlan_id:<10} {rd:<15}")
+            
+            table_lines.append("-" * 100)
+            table_lines.append(f"Total VRFs: {len(vrf_elements)}")
+            table_lines.append("=" * 100)
+            
+            return "\n".join(table_lines)
+            
+        except Exception as e:
+            return f"Error parsing VRF XML: {str(e)}"
+    
+    @staticmethod
+    def parse_route_list(xml_data: str, max_rows: int = 15, route_type: str = "IPv4") -> str:
+        """Parse route list XML and convert to table format."""
+        try:
+            root = ET.fromstring(xml_data)
+            
+            # Find all RouteUcSandeshData elements
+            route_elements = root.findall(".//RouteUcSandeshData")
+            
+            if not route_elements:
+                return f"No {route_type} route data found in XML response"
+            
+            # Create table header
+            table_lines = []
+            table_lines.append("=" * 120)
+            table_lines.append(f"{route_type} ROUTE TABLE (HTTP API)")
+            table_lines.append("=" * 120)
+            table_lines.append(f"{'Prefix':<25} {'Len':<4} {'VRF':<30} {'Next-hop':<10} {'Label':<8} {'Peer':<15}")
+            table_lines.append("-" * 120)
+            
+            # Parse each route entry
+            count = 0
+            for route in route_elements[:max_rows]:
+                src_ip = route.find("src_ip").text if route.find("src_ip") is not None else "N/A"
+                src_plen = route.find("src_plen").text if route.find("src_plen") is not None else "0"
+                prefix = f"{src_ip}/{src_plen}"
+                
+                vrf_elem = route.find("src_vrf")
+                vrf = vrf_elem.text if vrf_elem is not None else "N/A"
+                if len(vrf) > 25:
+                    vrf = vrf[:22] + "..."
+                
+                # Get path information (first path)
+                path_list = route.find("path_list")
+                nh_index = "N/A"
+                label = "N/A"
+                peer = "N/A"
+                
+                if path_list is not None:
+                    path_data = path_list.find(".//PathSandeshData")
+                    if path_data is not None:
+                        nh_elem = path_data.find(".//nh_index")
+                        if nh_elem is not None:
+                            nh_index = nh_elem.text
+                        
+                        label_elem = path_data.find("label")
+                        if label_elem is not None:
+                            label = label_elem.text
+                        
+                        peer_elem = path_data.find("peer")
+                        if peer_elem is not None:
+                            peer = peer_elem.text
+                            if len(peer) > 12:
+                                peer = peer[:9] + "..."
+                
+                table_lines.append(f"{prefix:<25} {src_plen:<4} {vrf:<30} {nh_index:<10} {label:<8} {peer:<15}")
+                count += 1
+            
+            if len(route_elements) > max_rows:
+                table_lines.append(f"... and {len(route_elements) - max_rows} more routes (showing first {max_rows})")
+            
+            table_lines.append("-" * 120)
+            table_lines.append(f"Total {route_type} Routes: {len(route_elements)}")
+            table_lines.append("=" * 120)
+            
+            return "\n".join(table_lines)
+            
+        except Exception as e:
+            return f"Error parsing {route_type} route XML: {str(e)}"
+    
+    @staticmethod
+    def parse_interface_list(xml_data: str, max_rows: int = 10) -> str:
+        """Parse interface list XML and convert to table format."""
+        try:
+            root = ET.fromstring(xml_data)
+            
+            # Find all ItfSandeshData elements
+            intf_elements = root.findall(".//ItfSandeshData")
+            
+            if not intf_elements:
+                return "No interface data found in XML response"
+            
+            # Create table header
+            table_lines = []
+            table_lines.append("=" * 120)
+            table_lines.append("INTERFACE TABLE (HTTP API)")
+            table_lines.append("=" * 120)
+            table_lines.append(f"{'Index':<6} {'Name':<15} {'Type':<8} {'Status':<8} {'VRF':<25} {'IP Address':<15} {'MAC Address':<18}")
+            table_lines.append("-" * 120)
+            
+            # Parse each interface entry
+            count = 0
+            for intf in intf_elements[:max_rows]:
+                index = intf.find("index").text if intf.find("index") is not None else "N/A"
+                name = intf.find("name").text if intf.find("name") is not None else "N/A"
+                intf_type = intf.find("type").text if intf.find("type") is not None else "N/A"
+                active = intf.find("active").text if intf.find("active") is not None else "N/A"
+                vrf_name = intf.find("vrf_name").text if intf.find("vrf_name") is not None else "N/A"
+                ip_addr = intf.find("ip_addr").text if intf.find("ip_addr") is not None else "N/A"
+                mac_addr = intf.find("mac_addr").text if intf.find("mac_addr") is not None else "N/A"
+                
+                # Truncate long VRF names
+                if len(vrf_name) > 20:
+                    vrf_name = vrf_name[:17] + "..."
+                
+                table_lines.append(f"{index:<6} {name:<15} {intf_type:<8} {active:<8} {vrf_name:<25} {ip_addr:<15} {mac_addr:<18}")
+                count += 1
+            
+            if len(intf_elements) > max_rows:
+                table_lines.append(f"... and {len(intf_elements) - max_rows} more interfaces (showing first {max_rows})")
+            
+            table_lines.append("-" * 120)
+            table_lines.append(f"Total Interfaces: {len(intf_elements)}")
+            table_lines.append("=" * 120)
+            
+            return "\n".join(table_lines)
+            
+        except Exception as e:
+            return f"Error parsing interface XML: {str(e)}"
 
 
 class EnhancedMCPHTTPServer:
@@ -1016,14 +1657,14 @@ class EnhancedMCPHTTPServer:
                         }
                     ),
                     types.Tool(
-                        name="execute_crpd_command",
-                        description="Execute a command in cRPD pods in jcnr namespace across all clusters",
+                        name="execute_junos_cli_commands",
+                        description="Execute a command in all cRPD and cSRX pods in jcnr namespace across all clusters. Automatically prepends 'cli -c' to commands for proper Junos CLI execution.",
                         inputSchema={
                             "type": "object",
                             "properties": {
                                 "command": {
                                     "type": "string",
-                                    "description": "Command to execute in cRPD pods"
+                                    "description": "Command to execute in cRPD/cSRX pods"
                                 },
                                 "cluster_name": {
                                     "type": "string",
@@ -1093,6 +1734,46 @@ class EnhancedMCPHTTPServer:
                                 }
                             },
                             "required": []
+                        }
+                    ),
+                    types.Tool(
+                        name="pod_command_and_summary",
+                        description="Run a set of commands on a pod and summarize the outputs with execution statistics. Commands are loaded exclusively from a file referenced in the cluster configuration's 'pod_command_list' field.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "pod_name": {
+                                    "type": "string",
+                                    "description": "Name of the pod to execute commands on"
+                                },
+                                "namespace": {
+                                    "type": "string",
+                                    "description": "Kubernetes namespace of the pod"
+                                },
+                                "container": {
+                                    "type": "string",
+                                    "description": "Container name (optional, defaults to first container)"
+                                },
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, uses default if not specified)"
+                                }
+                            },
+                            "required": ["pod_name", "namespace"]
+                        }
+                    ),
+                    types.Tool(
+                        name="jcnr_summary",
+                        description="Get JCNR datapath summary by running commands and fetching HTTP API data from DPDK pods. Commands are loaded exclusively from the jcnr_command_list file specified in cluster configuration.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (required - cluster must have jcnr_command_list configured)"
+                                }
+                            },
+                            "required": ["cluster_name"]
                         }
                     )
                 ]
@@ -1256,7 +1937,7 @@ class EnhancedMCPHTTPServer:
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error executing Agent command: {str(e)}")]
                 
-                elif name == "execute_crpd_command":
+                elif name == "execute_junos_cli_commands":
                     if not KUBERNETES_AVAILABLE:
                         return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
                     
@@ -1267,12 +1948,12 @@ class EnhancedMCPHTTPServer:
                         return [types.TextContent(type="text", text="Error: command parameter is required")]
                     
                     try:
-                        results = self.k8s_manager.execute_crpd_command(command, cluster_name)
+                        results = self.k8s_manager.execute_junos_cli_commands(command, cluster_name)
                         
                         if not results:
-                            return [types.TextContent(type="text", text="No cRPD pods found in jcnr namespace")]
+                            return [types.TextContent(type="text", text="No cRPD or cSRX pods found in jcnr namespace")]
                         
-                        output_lines = [f"cRPD Command Execution Results for: {command}"]
+                        output_lines = [f"Junos CLI Command Execution Results for: {command}"]
                         output_lines.append("=" * 60)
                         
                         for result in results:
@@ -1421,6 +2102,7 @@ class EnhancedMCPHTTPServer:
                                 large_files = log_analysis.get("large_files", [])
                                 if large_files:
                                     output_lines.append(f"\nLarge log files (>10MB):")
+                                   
                                     for large_file in large_files[:5]:  # Show first 5
                                         output_lines.append(f"  {large_file}")
                                     if len(large_files) > 5:
@@ -1438,6 +2120,527 @@ class EnhancedMCPHTTPServer:
                         return [types.TextContent(type="text", text="\n".join(output_lines))]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error analyzing logs: {str(e)}")]
+                
+                elif name == "pod_command_and_summary":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    pod_name = arguments.get("pod_name")
+                    namespace = arguments.get("namespace")
+                    container = arguments.get("container")
+                    cluster_name = arguments.get("cluster_name")
+                    
+                    if not pod_name or not namespace:
+                        return [types.TextContent(type="text", text="Error: pod_name and namespace are required")]
+                    
+                    if not cluster_name:
+                        return [types.TextContent(type="text", text="Error: cluster_name is required - this tool requires a cluster with pod_command_list configuration")]
+                    
+                    try:
+                        result = self.k8s_manager.pod_command_and_summary(
+                            pod_name, namespace, container, cluster_name
+                        )
+                        
+                        output_lines = ["Command Execution Summary"]
+                        output_lines.append("=" * 50)
+                        
+                        # Basic info
+                        output_lines.append(f"Pod: {result['pod']}")
+                        output_lines.append(f"Namespace: {result['namespace']}")
+                        output_lines.append(f"Container: {result.get('container', 'N/A')}")
+                        output_lines.append(f"Cluster: {result['cluster']}")
+                        output_lines.append(f"Command Source: {result.get('command_source', 'unknown')}")
+                        
+                        # Show commands to be executed
+                        if result.get('commands_to_execute'):
+                            output_lines.append(f"Commands to Execute: {len(result['commands_to_execute'])}")
+                            for i, cmd in enumerate(result['commands_to_execute'], 1):
+                                output_lines.append(f"  {i}. {cmd}")
+                        
+                        # Check for errors
+                        if result.get("error"):
+                            output_lines.append(f"Error: {result['error']}")
+                            return [types.TextContent(type="text", text="\n".join(output_lines))]
+                        
+                        # Execution summary
+                        output_lines.append("")
+                        output_lines.append("Execution Summary:")
+                        output_lines.append(f"  Commands executed: {result['commands_executed']}")
+                        output_lines.append(f"  Successful: {result['commands_successful']}")
+                        output_lines.append(f"  Failed: {result['commands_failed']}")
+                        output_lines.append(f"  Success rate: {result.get('success_rate', '0%')}")
+                        output_lines.append(f"  Total output size: {result.get('total_output_size_bytes', 0)} bytes")
+                        output_lines.append(f"  Estimated execution time: {result.get('estimated_execution_time', 'Unknown')}")
+                        
+                        # Individual command results
+                        output_lines.append("")
+                        output_lines.append("Command Details:")
+                        output_lines.append("-" * 50)
+                        
+                        for cmd_result in result.get("results", []):
+                            cmd_num = cmd_result.get("command_number", "?")
+                            command = cmd_result.get("command", "Unknown")
+                            status = cmd_result.get("status", "unknown")
+                            output_size = cmd_result.get("output_size_bytes", 0)
+                            output_lines_count = cmd_result.get("output_lines", 0)
+                            
+                            # Status indicator
+                            status_icon = "✓" if status == "success" else "✗"
+                            
+                            output_lines.append(f"\n{status_icon} Command {cmd_num}: {command}")
+                            output_lines.append(f"   Status: {status}")
+                            output_lines.append(f"   Output: {output_lines_count} lines, {output_size} bytes")
+                            
+                            # Show error if present
+                            if cmd_result.get("error"):
+                                output_lines.append(f"   Error: {cmd_result['error']}")
+                            
+                            # Show output preview
+                            preview = cmd_result.get("output_preview", {})
+                            if preview.get("content"):
+                                if preview.get("total_lines", 0) <= 3:
+                                    output_lines.append(f"   Output: {preview['content']}")
+                                else:
+                                    output_lines.append(f"   First line: {preview.get('first_line', 'N/A')}")
+                                    output_lines.append(f"   Last line: {preview.get('last_line', 'N/A')}")
+                                    output_lines.append(f"   ({preview.get('total_lines', 0)} total lines)")
+                            
+                            # Show if output was truncated
+                            if cmd_result.get("full_output_available"):
+                                output_lines.append("   [Output truncated - use individual command execution for full output]")
+                        
+                        # Footer
+                        output_lines.append("")
+                        output_lines.append("=" * 50)
+                        output_lines.append("Use individual execute_command calls for full command outputs")
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error running commands: {str(e)}")]
+                
+                elif name == "jcnr_summary":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    cluster_name = arguments.get("cluster_name")
+                    
+                    # Load JCNR command configuration for the cluster - now requires file configuration
+                    try:
+                        jcnr_config = self.k8s_manager.load_jcnr_command_list(cluster_name)
+                        datapath_commands = jcnr_config.get("datapath_commands", [])
+                        junos_cli_commands = jcnr_config.get("junos_cli_commands", [])
+                        http_endpoints = jcnr_config.get("http_endpoints", {})
+                        http_port = jcnr_config.get("http_port", 8085)
+                        analysis_config = jcnr_config.get("analysis_config", {})
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error loading JCNR configuration: {str(e)}")]
+                    
+                    try:
+                        # Get all DPDK pods in contrail namespace
+                        results = []
+                        clusters_to_check = [cluster_name] if cluster_name else list(self.k8s_manager.clusters_config.keys())
+                        
+                        for cluster in clusters_to_check:
+                            try:
+                                # Use the existing logic from execute_dpdk_command to find DPDK pods
+                                if not KUBERNETES_AVAILABLE:
+                                    continue
+                                
+                                # Use the proper get_k8s_client method which handles SSH tunnels and kubeconfig loading
+                                v1 = self.k8s_manager.get_k8s_client(cluster)
+                                
+                                # List pods in contrail namespace and filter for DPDK pods only
+                                pods = v1.list_namespaced_pod(namespace="contrail")
+                                
+                                dpdk_pods_found = 0
+                                for pod in pods.items:
+                                    # Look for DPDK pods specifically - must contain "vrdpdk" in name and be Running
+                                    # This ensures we only target DPDK datapath pods, not Agent pods
+                                    if ("vrdpdk" in pod.metadata.name.lower() and 
+                                        pod.status.phase == "Running" and
+                                        pod.status.container_statuses and 
+                                        all(container.ready for container in pod.status.container_statuses)):
+                                        
+                                        dpdk_pods_found += 1
+                                        
+                                        # Prepare summary result structure
+                                        summary_result = {
+                                            "cluster": cluster,
+                                            "pod_name": pod.metadata.name,
+                                            "pod_type": "DPDK",
+                                            "namespace": "contrail",
+                                            "commands_executed": [],
+                                            "http_api_results": {},
+                                            "analysis": {}
+                                        }
+                                        
+                                        # Execute each datapath command on this DPDK pod
+                                        for cmd in datapath_commands:
+                                            try:
+                                                cmd_result = self.k8s_manager.execute_pod_command(
+                                                    pod.metadata.name, "contrail", cmd, None, cluster
+                                                )
+                                                summary_result["commands_executed"].append({
+                                                    "command": cmd,
+                                                    "status": cmd_result.get("status", "unknown"),
+                                                    "output_length": len(cmd_result.get("output", "")),
+                                                    "output": cmd_result.get("output", "")[:500] + "..." if len(cmd_result.get("output", "")) > 500 else cmd_result.get("output", "")
+                                                })
+                                            except Exception as cmd_e:
+                                                summary_result["commands_executed"].append({
+                                                    "command": cmd,
+                                                    "status": "error",
+                                                    "output": f"Error: {str(cmd_e)}"
+                                                })
+                                        
+                                        # Add pod metadata
+                                        summary_result["pod_ready_containers"] = len([c for c in pod.status.container_statuses if c.ready])
+                                        summary_result["total_containers"] = len(pod.status.container_statuses) if pod.status.container_statuses else 0
+                                        results.append(summary_result)
+                                
+                                # Log if no DPDK pods found in this cluster
+                                if dpdk_pods_found == 0:
+                                    results.append({
+                                        "cluster": cluster,
+                                        "error": "No DPDK pods (vrdpdk) found or none are ready in contrail namespace"
+                                    })
+                                
+                                # Now process cRPD pods for Junos CLI commands if we have any
+                                if junos_cli_commands:
+                                    try:
+                                        # List pods in jcnr namespace and filter for cRPD pods
+                                        jcnr_pods = v1.list_namespaced_pod(namespace="jcnr")
+                                        
+                                        crpd_pods_found = 0
+                                        for pod in jcnr_pods.items:
+                                            # Look for cRPD pods specifically - must contain "crpd" in name and be Running
+                                            if "crpd" in pod.metadata.name.lower() and pod.status.phase == "Running":
+                                                # Check if all containers are ready
+                                                if pod.status.container_statuses and all(c.ready for c in pod.status.container_statuses):
+                                                    crpd_pods_found += 1
+                                                    
+                                                    # Prepare cRPD summary result structure
+                                                    crpd_summary_result = {
+                                                        "cluster": cluster,
+                                                        "pod_name": pod.metadata.name,
+                                                        "pod_type": "cRPD",
+                                                        "namespace": "jcnr",
+                                                        "junos_commands_executed": [],
+                                                        "analysis": {}
+                                                    }
+                                                    
+                                                    # Execute each Junos CLI command on this cRPD pod
+                                                    for cmd in junos_cli_commands:
+                                                        try:
+                                                            # Format command with cli -c if needed
+                                                            formatted_cmd = cmd
+                                                            if not cmd.startswith("cli -c") and not cmd.startswith("cli -C"):
+                                                                if cmd.startswith("cli "):
+                                                                    formatted_cmd = cmd[4:].strip()
+                                                                formatted_cmd = f"cli -c '{formatted_cmd}'"
+                                                            
+                                                            cmd_result = self.k8s_manager.execute_pod_command(
+                                                                pod.metadata.name, "jcnr", formatted_cmd, None, cluster
+                                                            )
+                                                            crpd_summary_result["junos_commands_executed"].append({
+                                                                "command": cmd,
+                                                                "status": cmd_result.get("status", "unknown"),
+                                                                "output_length": len(cmd_result.get("output", "")),
+                                                                "output": cmd_result.get("output", "")[:500] + "..." if len(cmd_result.get("output", "")) > 500 else cmd_result.get("output", "")
+                                                            })
+                                                        except Exception as cmd_e:
+                                                            crpd_summary_result["junos_commands_executed"].append({
+                                                                "command": cmd,
+                                                                "status": "error",
+                                                                "output": f"Error: {str(cmd_e)}"
+                                                            })
+                                                    
+                                                    # Add pod metadata
+                                                    crpd_summary_result["pod_ready_containers"] = len([c for c in pod.status.container_statuses if c.ready])
+                                                    crpd_summary_result["total_containers"] = len(pod.status.container_statuses) if pod.status.container_statuses else 0
+                                                    results.append(crpd_summary_result)
+                                        
+                                        # Log if no cRPD pods found in this cluster
+                                        if crpd_pods_found == 0 and junos_cli_commands:
+                                            results.append({
+                                                "cluster": cluster,
+                                                "warning": "No cRPD pods found or none are ready in jcnr namespace for Junos CLI commands"
+                                            })
+                                            
+                                    except Exception as crpd_e:
+                                        results.append({
+                                            "cluster": cluster,
+                                            "error": f"Failed to process cRPD pods: {str(crpd_e)}"
+                                        })
+                                        
+                            except Exception as e:
+                                results.append({
+                                    "cluster": cluster,
+                                    "error": f"Failed to process cluster: {str(e)}"
+                                })
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No DPDK pods found in contrail namespace across any clusters")]
+                        
+                        # Format the output with enhanced analysis
+                        output_lines = [f"JCNR Datapath Summary with Route/Next-hop/Flow Analysis + HTTP API + Junos CLI"]
+                        output_lines.append("=" * 80)
+                        output_lines.append(f"DPDK Commands: {', '.join(datapath_commands)}")
+                        if junos_cli_commands:
+                            output_lines.append(f"Junos CLI Commands: {', '.join(junos_cli_commands[:5])}{'...' if len(junos_cli_commands) > 5 else ''} ({len(junos_cli_commands)} total)")
+                        endpoint_names = list(http_endpoints.keys())
+                        output_lines.append(f"HTTP API Endpoints: {', '.join(endpoint_names)}")
+                        output_lines.append(f"HTTP Port: {http_port}")
+                        if cluster_name:
+                            output_lines.append(f"Configuration loaded for cluster: {cluster_name}")
+                        output_lines.append("=" * 80)
+                        
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            pod = result.get("pod", result.get("pod_name", "unknown"))  # Try both pod and pod_name fields
+                            pod_type = result.get("pod_type", "unknown")
+                            status = result.get("status", "unknown")
+                            
+                            if result.get("error"):
+                                output_lines.append(f"\nCluster: {cluster}")
+                                output_lines.append(f"Error: {result['error']}")
+                                output_lines.append("-" * 40)
+                                continue
+                            
+                            if result.get("warning"):
+                                output_lines.append(f"\nCluster: {cluster}")
+                                output_lines.append(f"Warning: {result['warning']}")
+                                output_lines.append("-" * 40)
+                                continue
+                            
+                            output_lines.append(f"\n🖥️  Cluster: {cluster} | Pod: {pod} | Type: {pod_type}")
+                            output_lines.append("=" * 80)
+                            
+                            # Initialize command_outputs variable
+                            command_outputs = {}
+                            
+                            # Handle DPDK pods (original datapath analysis)
+                            if pod_type == "DPDK":
+                                # Execution summary
+                                commands_executed = result.get('commands_executed', 0)
+                                commands_successful = result.get('commands_successful', 0)
+                                commands_failed = result.get('commands_failed', 0)
+                                success_rate = result.get('success_rate', '0%')
+                                
+                                output_lines.append(f"📊 Execution Summary: {commands_executed} commands, {success_rate} success rate")
+                                
+                                # Get full command outputs by executing individual commands for DPDK pods
+                                # Add debug information
+                                output_lines.append(f"\n🔍 Debug: Attempting to get full outputs for pod {pod} in cluster {cluster}")
+                                
+                                try:
+                                    for command in datapath_commands:
+                                        try:
+                                            cmd_results = self.k8s_manager.execute_dpdk_command(command, cluster)
+                                            output_lines.append(f"Debug: Got {len(cmd_results) if cmd_results else 0} results for command '{command}'")
+                                            
+                                            for cmd_result in cmd_results:
+                                                result_cluster = cmd_result.get("cluster", "")
+                                                result_pod = cmd_result.get("pod", "")
+                                                result_status = cmd_result.get("status", "")
+                                                
+                                                output_lines.append(f"Debug: Result - cluster:{result_cluster}, pod:{result_pod}, status:{result_status}")
+                                                
+                                                if (result_cluster == cluster and 
+                                                    pod in result_pod and  # Use 'in' instead of exact match
+                                                    result_status == "success"):
+                                                    command_outputs[command] = cmd_result.get("output", "")
+                                                    output_lines.append(f"Debug: Stored output for {command} ({len(command_outputs[command])} chars)")
+                                                    break
+                                        except Exception as cmd_e:
+                                            output_lines.append(f"Debug: Error with command '{command}': {str(cmd_e)}")
+                                            
+                                except Exception as e:
+                                    output_lines.append(f"Note: Could not retrieve full command outputs: {str(e)}")
+                            
+                            # Handle cRPD pods (Junos CLI analysis)
+                            elif pod_type == "cRPD":
+                                # Get Junos CLI command outputs from the result
+                                junos_commands_executed = result.get('junos_commands_executed', [])
+                                
+                                output_lines.append(f"📊 Junos CLI Execution Summary: {len(junos_commands_executed)} commands executed")
+                                output_lines.append(f"🔍 Debug: Processing cRPD pod {pod} in cluster {cluster}")
+                                
+                                # Store Junos CLI outputs in command_outputs for consistent processing
+                                for cmd_result in junos_commands_executed:
+                                    command = cmd_result.get("command", "")
+                                    status = cmd_result.get("status", "unknown")
+                                    output = cmd_result.get("output", "")
+                                    
+                                    if status == "success":
+                                        command_outputs[command] = output
+                                        output_lines.append(f"Debug: Stored Junos CLI output for '{command}' ({len(output)} chars)")
+                                    else:
+                                        output_lines.append(f"Debug: Junos CLI command '{command}' failed: {status}")
+                                
+                                output_lines.append(f"Debug: Total Junos CLI commands with outputs: {len(command_outputs)}")
+                            
+                            output_lines.append(f"Debug: Total commands with outputs: {len(command_outputs)}")
+                            
+                            # Get HTTP API outputs from Sandesh HTTP server (port 8085) - only for DPDK pods
+                            http_outputs = {}
+                            if pod_type == "DPDK" and HTTP_AVAILABLE:
+                                try:
+                                    # Get pod IP for HTTP requests
+                                    v1 = self.k8s_manager.get_k8s_client(cluster)
+                                    pod_info = v1.read_namespaced_pod(name=pod, namespace="contrail")
+                                    pod_ip = pod_info.status.pod_ip
+                                    
+                                    if pod_ip:
+                                        output_lines.append(f"🌐 Fetching HTTP API data from pod IP: {pod_ip}:{http_port}")
+                                        
+                                        # Use configurable HTTP API endpoints
+                                        for endpoint_name, endpoint_config in http_endpoints.items():
+                                            try:
+                                                endpoint_uri = endpoint_config.get("uri", endpoint_config) if isinstance(endpoint_config, dict) else endpoint_config
+                                                url = f"http://{pod_ip}:{http_port}/{endpoint_uri}"
+                                                output_lines.append(f"Debug: Requesting {url}")
+                                                
+                                                response = requests.get(url, timeout=10)
+                                                if response.status_code == 200:
+                                                    # Store both endpoint name and URI for flexible access
+                                                    http_outputs[endpoint_name] = {
+                                                        "data": response.text,
+                                                        "uri": endpoint_uri
+                                                    }
+                                                    output_lines.append(f"Debug: Got {len(response.text)} chars from {endpoint_name}")
+                                                else:
+                                                    output_lines.append(f"Debug: HTTP {response.status_code} for {endpoint_name}")
+                                                    
+                                            except Exception as http_e:
+                                                output_lines.append(f"Debug: Error fetching {endpoint_name}: {str(http_e)}")
+                                    else:
+                                        output_lines.append("Debug: Pod IP not available for HTTP requests")
+                                        
+                                except Exception as e:
+                                    output_lines.append(f"Debug: Could not get pod info for HTTP requests: {str(e)}")
+                            elif pod_type == "DPDK":
+                                output_lines.append("Debug: HTTP requests library not available")
+                            
+                            # Full Command Outputs Section
+                            output_lines.append("\n📄 FULL COMMAND OUTPUTS")
+                            output_lines.append("=" * 80)
+                            
+                            # Determine which commands to display based on pod type
+                            commands_to_display = []
+                            if pod_type == "DPDK":
+                                commands_to_display = datapath_commands
+                            elif pod_type == "cRPD":
+                                commands_to_display = junos_cli_commands
+                            
+                            for command in commands_to_display:
+                                cmd_output = command_outputs.get(command, "")
+                                output_lines.append(f"\n🔧 Command: {command}")
+                                output_lines.append("-" * 60)
+                                if cmd_output:
+                                    # Use configurable output limits
+                                    max_lines = analysis_config.get("max_display_lines", 50)
+                                    lines = cmd_output.strip().split('\n')
+                                    if analysis_config.get("truncate_large_outputs", True) and len(lines) > max_lines:
+                                        output_lines.append(f"[Showing first {max_lines} lines of {len(lines)} total lines]")
+                                        output_lines.extend(lines[:max_lines])
+                                        output_lines.append(f"[... {len(lines) - max_lines} more lines truncated for display]")
+                                    else:
+                                        output_lines.append(cmd_output.strip())
+                                else:
+                                    output_lines.append("No output available or command failed")
+                                output_lines.append("")
+                            
+                            # HTTP API Outputs Section (only for DPDK pods with XML to table translation)
+                            if http_outputs and pod_type == "DPDK":
+                                output_lines.append("\n🌐 SANDESH HTTP API OUTPUTS")
+                                output_lines.append("=" * 80)
+                                
+                                for endpoint_name, endpoint_info in http_outputs.items():
+                                    output_lines.append(f"\n🔗 API Endpoint: {endpoint_name}")
+                                    output_lines.append("-" * 60)
+                                    
+                                    # Extract data and URI
+                                    http_data = endpoint_info.get("data", "") if isinstance(endpoint_info, dict) else endpoint_info
+                                    endpoint_uri = endpoint_info.get("uri", "") if isinstance(endpoint_info, dict) else ""
+                                    
+                                    if http_data:
+                                        # Try to format XML data as readable tables using URI patterns instead of endpoint names
+                                        try:
+                                            formatter = XMLTableFormatter()
+                                            
+                                            # Use URI patterns for more stable matching
+                                            if "NhListReq" in endpoint_uri:
+                                                formatted_output = formatter.parse_nh_list(http_data, 
+                                                    analysis_config.get("max_table_rows", 20))
+                                                output_lines.append(formatted_output)
+                                            elif "VrfListReq" in endpoint_uri:
+                                                formatted_output = formatter.parse_vrf_list(http_data)
+                                                output_lines.append(formatted_output)
+                                            elif "Inet4UcRouteReq" in endpoint_uri:
+                                                formatted_output = formatter.parse_route_list(http_data, 
+                                                    analysis_config.get("max_table_rows", 15), "IPv4")
+                                                output_lines.append(formatted_output)
+                                            elif "Inet6UcRouteReq" in endpoint_uri:
+                                                formatted_output = formatter.parse_route_list(http_data, 
+                                                    analysis_config.get("max_table_rows", 15), "IPv6")
+                                                output_lines.append(formatted_output)
+                                            elif "ItfReq" in endpoint_uri:
+                                                formatted_output = formatter.parse_interface_list(http_data, 
+                                                    analysis_config.get("max_table_rows", 10))
+                                                output_lines.append(formatted_output)
+                                            else:
+                                                # For other endpoints, show truncated raw XML
+                                                max_chars = analysis_config.get("max_http_display_chars", 5000)
+                                                if analysis_config.get("truncate_large_outputs", True) and len(http_data) > max_chars:
+                                                    output_lines.append(f"[Showing first {max_chars} characters of {len(http_data)} total characters]")
+                                                    output_lines.append(http_data[:max_chars])
+                                                    output_lines.append(f"[... {len(http_data) - max_chars} more characters truncated for display]")
+                                                else:
+                                                    output_lines.append(http_data)
+                                        except Exception as format_e:
+                                            # If formatting fails, fall back to truncated raw XML
+                                            output_lines.append(f"Note: XML formatting failed ({str(format_e)}), showing raw data:")
+                                            max_chars = analysis_config.get("max_http_display_chars", 5000)
+                                            if analysis_config.get("truncate_large_outputs", True) and len(http_data) > max_chars:
+                                                output_lines.append(f"[Showing first {max_chars} characters of {len(http_data)} total characters]")
+                                                output_lines.append(http_data[:max_chars])
+                                                output_lines.append(f"[... {len(http_data) - max_chars} more characters truncated for display]")
+                                            else:
+                                                output_lines.append(http_data)
+                                    else:
+                                        output_lines.append("No data available from this endpoint")
+                                    output_lines.append("")
+                            
+                            # Simple Command Execution Summary
+                            output_lines.append("\n Command Execution Summary")
+                            output_lines.append("-" * 80)
+                            if pod_type == "DPDK":
+                                for cmd_result in result.get("results", []):
+                                    cmd_num = cmd_result.get("command_number", "?")
+                                    command = cmd_result.get("command", "Unknown")
+                                    cmd_status = cmd_result.get("status", "unknown")
+                                    output_lines_count = cmd_result.get("output_lines", 0)
+                                    
+                                    status_icon = "✓" if cmd_status == "success" else "✗"
+                                    output_lines.append(f"  {status_icon} Command {cmd_num}: {command} ({cmd_status}, {output_lines_count} lines)")
+                            elif pod_type == "cRPD":
+                                for cmd_result in result.get("junos_commands_executed", []):
+                                    command = cmd_result.get("command", "Unknown")
+                                    cmd_status = cmd_result.get("status", "unknown")
+                                    output_length = cmd_result.get("output_length", 0)
+                                    
+                                    status_icon = "✓" if cmd_status == "success" else "✗"
+                                    output_lines.append(f"  {status_icon} Junos CLI: {command} ({cmd_status}, {output_length} chars)")
+                            
+                            output_lines.append("-" * 80)
+                            
+                            output_lines.append("-" * 80)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error getting JCNR summary: {str(e)}")]
                 
                 else:
                     raise ValueError(f"Unknown tool: {name}")
@@ -1502,7 +2705,9 @@ Available Tools:
 - execute_command: Execute commands in pods
 - execute_dpdk_command: Execute commands in all DPDK pods (vrdpdk) in contrail namespace
 - execute_agent_command: Execute commands in all Agent pods (vrouter-nodes) in contrail namespace
-- execute_crpd_command: Execute commands in all cRPD pods in jcnr namespace
+- execute_junos_cli_commands: Execute commands in all cRPD and cSRX pods in jcnr namespace
+- pod_command_and_summary: Run multiple commands on a pod and get execution summary
+- jcnr_summary: Get JCNR datapath summary from DPDK pods (commands loaded from jcnr_command_list file)
 """
             
             elif uri == "memory://k8s-help":

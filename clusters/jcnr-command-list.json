@@ -1,0 +1,38 @@
+{
+  "datapath_commands": [
+    "nh --list",
+    "vif --list",
+    "rt --dump 0",
+    "rt --dump 0 --family inet6",
+    "frr --dump",
+    "mpls --dump",
+    "flow -l"
+  ],
+  "junos_cli_commands": [
+    "show interfaces extensive",
+    "show route summary",
+    "show route",
+    "show route protocol bgp",
+    "show route protocol direct",
+    "show route protocol static",
+    "show bgp summary",
+    "show bgp neighbor",
+    "show protocols bgp",
+    "show configuration"
+  ],
+  "http_endpoints": {
+    "nh_list": "Snh_NhListReq?type=&nh_index=&policy_enabled=",
+    "vrf_list": "Snh_VrfListReq?name=",
+    "inet4_routes": "Snh_Inet4UcRouteReq?x=0",
+    "inet6_routes": "Snh_Inet6UcRouteReq?x=0",
+    "interface_list": "Snh_ItfReq?name=",
+    "flow_list": "Snh_FetchFlowRecord?x=0"
+  },
+  "http_port": 8085,
+  "analysis_config": {
+    "max_display_lines": 50,
+    "max_http_display_chars": 5000,
+    "enable_detailed_analysis": true,
+    "truncate_large_outputs": true
+  }
+}

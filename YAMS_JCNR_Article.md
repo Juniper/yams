@@ -78,50 +78,79 @@ Many JCNR deployments are in private or on-premises environments. YAMS supports 
 
 Integration with VS Code Copilot Chat allows for natural language interactions:
 
-- **"Check DPDK interface statistics across all clusters"**
-- **"Find any core files in the last 24 hours"**
-- **"Show me error logs from contrail agents"**
-- **"Generate a core dump of the DPDK process for debugging"**
+- **"Run comprehensive JCNR analysis on production cluster"** → `jcnr_summary`
+- **"Check DPDK interface statistics across all clusters"** → `execute_dpdk_command`
+- **"Find any core files in the last 24 hours"** → `check_core_files`
+- **"Show me error logs from contrail agents"** → `analyze_logs`
+- **"Execute system diagnostics on contrail tools pod"** → `pod_command_and_summary`
+- **"Get BGP neighbor status from all cRPD instances"** → `execute_junos_cli_commands`
 
 ## Real-World Use Cases
 
-### Use Case 1: Multi-Cluster Health Check
+### Use Case 1: Comprehensive JCNR Health Analysis
 
-A network operations team needs to verify JCNR health across 15 production clusters:
+A network operations team needs to perform deep analysis of JCNR across 15 production clusters:
 
 ```bash
-# Single YAMS command checks all clusters
-execute_dpdk_command: "contrail-status"
-execute_agent_command: "vif --list"
-execute_crpd_command: "show bgp summary"
+# Single YAMS command provides complete datapath analysis
+jcnr_summary: cluster_name="all"
 ```
 
-**Result**: Health report across all clusters, reducing manual checking time.
+**Result**: Unified report combining:
+- DPDK datapath statistics (next-hops, interfaces, routes, flows)
+- HTTP API data with formatted tables (VRFs, routes, interface stats)
+- Junos CLI outputs (BGP status, routing tables, system information)
+- Command execution summary with success rates and timing
 
-### Use Case 2: Performance Troubleshooting
+### Use Case 2: Multi-Cluster Health Check
+
+A network operations team needs to verify JCNR health across production clusters:
+
+```bash
+# YAMS commands check all clusters with enhanced targeting
+execute_dpdk_command: "nh --list"
+execute_agent_command: "vif --list" 
+execute_junos_cli_commands: "show bgp summary"
+pod_command_and_summary: namespace="contrail", pod_name="contrail-tools"
+```
+
+**Result**: Health report across all clusters with detailed execution statistics.
+
+### Use Case 3: Performance Troubleshooting
 
 A customer reports intermittent packet drops in their JCNR environment:
 
 ```bash
-# YAMS provides comprehensive analysis
-analyze_logs: cluster_name="customer-prod", pattern="drop|error|fail"
-execute_dpdk_command: "dropstats"
+# YAMS provides comprehensive analysis with enhanced tools
+jcnr_summary: cluster_name="customer-prod"
+analyze_logs: cluster_name="customer-prod", pattern="drop|error|fail", max_lines=200
+execute_dpdk_command: "flow -l"
 execute_agent_command: "vif --get 0"
 ```
 
-**Result**: Identification of packet drop sources and interface statistics across the infrastructure.
+**Result**: Complete datapath analysis including:
+- Interface statistics with packet/byte counters and drop analysis
+- Flow table analysis showing active flows and drop patterns  
+- HTTP API data revealing routing and VRF state
+- Targeted log analysis with configurable patterns and limits
 
-### Use Case 3: Incident Response
+### Use Case 4: Incident Response
 
 A critical JCNR pod crashes in production:
 
 ```bash
-# YAMS enables rapid incident response
-check_core_files: cluster_name="prod-cluster"
-analyze_logs: pod_name="contrail-vrouter-dpdk-xyz", namespace="contrail"
+# YAMS enables rapid incident response with enhanced diagnostics
+check_core_files: cluster_name="prod-cluster", max_age_days=1
+analyze_logs: pod_name="contrail-vrouter-dpdk-xyz", namespace="contrail", max_lines=500
+jcnr_summary: cluster_name="prod-cluster"
+pod_command_and_summary: pod_name="contrail-tools", namespace="contrail"
 ```
 
-**Result**: Core files located, logs analyzed, and debugging information gathered efficiently.
+**Result**: 
+- Core files located with age filtering for recent crashes
+- Detailed log analysis with customizable line limits
+- Complete JCNR state analysis showing datapath and control plane status
+- System diagnostics with execution statistics and success rates
 
 ## Installation and Setup
 
@@ -129,7 +158,7 @@ analyze_logs: pod_name="contrail-vrouter-dpdk-xyz", namespace="contrail"
 
 ```bash
 # Clone YAMS repository
-git clone <yams-repository>
+git clone <yams-repository> yams-github
 cd yams-github
 
 # Quick start with Docker
@@ -163,42 +192,96 @@ Create `clusters/clusters.json` with your JCNR cluster details:
 {
   "jcnr-prod": {
     "kubeconfig_path": "/etc/kube/prod-config",
-    "description": "Production JCNR environment",
-    "environment": "production",
-    "location": "us-east-1"
+    "description": "Production JCNR cluster",
+    "pod_command_list": "/app/clusters/pod-command-list.json",
+    "jcnr_command_list": "/app/clusters/jcnr-command-list.json"
   },
   "jcnr-dev": {
-    "kubeconfig_path": "/etc/kube/dev-config", 
-    "description": "Development JCNR environment",
+    "kubeconfig_path": "/etc/kube/dev-config",
+    "description": "Development JCNR cluster", 
     "ssh": {
       "host": "dev-jump.company.com",
       "username": "devops",
       "key_path": "/home/user/.ssh/dev_key",
       "k8s_host": "localhost"
-    }
+    },
+    "pod_command_list": "/app/clusters/pod-command-list.json"
   }
+}
+```
+
+### Command Configuration
+
+Configure command sets in JSON files for flexible execution:
+
+**JCNR Commands** (`jcnr-command-list.json`):
+```json
+{
+  "dpdk_commands": ["nh --list", "vif --list", "rt --dump 0", "flow -l"],
+  "junos_cli_commands": ["show version", "show interfaces terse", "show route"],
+  "http_endpoints": {
+    "nh_list": "Snh_NhListReq",
+    "vrf_list": "Snh_VrfListReq", 
+    "inet4_routes": "Snh_Inet4UcRouteReq"
+  }
+}
+```
+
+**Pod Commands** (`pod-command-list.json`):
+```json
+{
+  "commands": ["uptime", "free -m", "df -h", "ps aux"]
 }
 ```
 
 ## Advanced Features
 
-### 1. **Specialized JCNR Commands**
+### 1. **Comprehensive JCNR Analysis**
 
-- **`execute_dpdk_command`**: Target all DPDK pods across clusters
-- **`execute_agent_command`**: Execute commands in Contrail Agent pods
-- **`execute_crpd_command`**: Interact with cRPD routing protocol daemons
+- **`jcnr_summary`**: Complete datapath analysis combining DPDK commands, HTTP API data, and Junos CLI outputs
+  - Executes configurable command sets from external JSON files
+  - Fetches Sandesh HTTP API data with XML-to-table conversion
+  - Provides unified view of next-hops, interfaces, routes, flows, and BGP status
+  - Supports both DPDK datapath and cRPD control plane analysis
 
-### 2. **Diagnostic Tools**
+### 2. **Specialized JCNR Commands**
 
-- **`check_core_files`**: Automated core dump detection
-- **`analyze_logs`**: Intelligent log analysis with error pattern recognition
-- **`execute_command`**: Generic pod command execution
+- **`execute_dpdk_command`**: Target all DPDK pods (vrouter-nodes-vrdpdk) across clusters
+- **`execute_agent_command`**: Execute commands in Contrail Agent pods (vrouter-nodes)
+- **`execute_junos_cli_commands`**: Interact with cRPD and cSRX routing protocol daemons
+  - Automatically prepends 'cli -c' for proper Junos CLI execution
+  - Supports comprehensive routing and interface analysis
 
-### 3. **Multi-Environment Support**
+### 3. **Enhanced Pod Management**
+
+- **`pod_command_and_summary`**: Execute predefined command sets on any pod with execution statistics
+  - Commands loaded from configurable JSON files
+  - Provides execution summary with success rates and timing
+  - Supports custom command lists per cluster
+
+### 4. **Diagnostic Tools**
+
+- **`check_core_files`**: Automated core dump detection with age filtering
+- **`analyze_logs`**: Intelligent log analysis with customizable error pattern recognition
+- **`execute_command`**: Generic pod command execution with container targeting
+
+### 5. **Flexible Configuration Management**
+
+- **External command configuration**: Commands loaded from JSON files for easy customization
+- **Per-cluster command sets**: Different command lists for different clusters
+- **Configurable analysis parameters**: Customizable log analysis patterns, age filters, and output limits
+
+### 6. **Multi-Cluster Support**
 
 - **Direct kubeconfig access** for local clusters
 - **SSH tunnel support** for remote/private clusters
-- **Mixed environment management** in single configuration
+- **Mixed cluster management** in single configuration
+
+### 7. **Enhanced HTTP API Integration**
+
+- **Sandesh API support**: Direct integration with JCNR HTTP APIs
+- **XML-to-table conversion**: Automatic formatting of complex XML responses using URI pattern matching
+- **Real-time data access**: Live datapath statistics and configuration data
 
 ## Security Considerations
 
@@ -213,19 +296,24 @@ YAMS includes security features for enterprise environments:
 
 Organizations using YAMS for JCNR management can see improvements in:
 
-- **Reduced troubleshooting time** through centralized access
-- **Fewer manual operations** across multiple clusters  
-- **Faster incident response** with unified tooling
-- **Reduced operational errors** through consistent interfaces
+- **Reduced troubleshooting time** through centralized access and comprehensive analysis
+- **Enhanced operational insights** with unified DPDK, Agent, and cRPD data
+- **Fewer manual operations** across multiple clusters with configurable command sets
+- **Faster incident response** with unified tooling and real-time HTTP API access
+- **Improved debugging capabilities** with integrated log analysis and core file detection
+- **Reduced operational errors** through consistent interfaces and automated command execution
+- **Better visibility** into JCNR datapath and control plane status with formatted reports
 
 ## Conclusion
 
 YAMS provides a unified approach to JCNR management across multiple Kubernetes clusters. By using Model Context Protocol and integrating with modern development tools, YAMS helps network teams:
 
+- **Perform comprehensive analysis** with integrated DPDK, HTTP API, and Junos CLI data
 - **Manage operations** across multiple clusters from a single interface
-- **Reduce troubleshooting complexity** with integrated tools
-- **Improve operational consistency** through standardized commands
-- **Work more efficiently** with natural language interfaces
+- **Reduce troubleshooting complexity** with automated diagnostic tools and configurable command sets
+- **Improve operational consistency** through standardized commands and flexible configuration
+- **Access real-time datapath information** via HTTP API integration with formatted output
+- **Work more efficiently** with natural language interfaces and execution statistics
 
 For organizations running JCNR deployments, YAMS offers a practical solution for simplifying multi-cluster management and improving operational workflows.
 

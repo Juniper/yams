@@ -1,0 +1,13 @@
+{
+  "description": "Standard diagnostic commands for pod health checking and system information gathering",
+  "commands": [
+    "hostname",
+    "uptime", 
+    "ps",
+    "df -h",
+    "free -m",
+    "cat /proc/meminfo",
+    "cat /proc/cpuinfo",
+    "ls -la /tmp"
+  ]
+}

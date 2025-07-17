@@ -8,6 +8,15 @@ __pycache__/
 .env
 .venv
 venv/
+
+# Temporary/unwanted files
+README_ENHANCED.md
+README_NEW.md
+INSTALLATION
+mcp-server.json
+docker-compose.yml
+docker-compose.dev.yml
+docker-setup.sh
 env/
 
 # Python Package Files
