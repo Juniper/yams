@@ -216,10 +216,10 @@ The following diagram illustrates the interconnected JCNR cluster topology used 
     ━━━━━  Physical Links (Ring topology)
     
     Network Details:
-    • JCNR2 ↔ JCNR3: Direct physical link (192.168.133.0/24), OSPF adjacency, SR node SID distribution
-    • JCNR3 ↔ JCNR6: Direct physical link (192.168.144.0/24), OSPF adjacency, SR node SID distribution  
-    • JCNR6 ↔ JCNR4: Direct physical link (192.168.155.0/24), OSPF adjacency, SR node SID distribution
-    • JCNR4 ↔ JCNR2: Direct physical link (192.168.200.0/24), OSPF adjacency, SR node SID distribution
+    • JCNR2 ↔ JCNR3: Direct physical link (192.168.133.0/24), OSPF adjacency, SR prefix SID distribution
+    • JCNR3 ↔ JCNR6: Direct physical link (192.168.144.0/24), OSPF adjacency, SR prefix SID distribution  
+    • JCNR6 ↔ JCNR4: Direct physical link (192.168.155.0/24), OSPF adjacency, SR prefix SID distribution
+    • JCNR4 ↔ JCNR2: Direct physical link (192.168.200.0/24), OSPF adjacency, SR prefix SID distribution
     • JCNR3 ↔ JCNR4: SR-MPLS tunnels with label stacking for L3VPN services
     
     Physical Ring Topology:
@@ -244,7 +244,7 @@ The following diagram illustrates the interconnected JCNR cluster topology used 
 
 This topology represents a typical SR-MPLS JCNR deployment where:
 - Multiple clusters provide distribution into multiple K8S clusters
-- OSPF distributes node SIDs and prefix SIDs for Segment Routing
+- OSPF distributes prefix SIDs and adjacency SIDs for Segment Routing
 - SR-MPLS provides simplified forwarding without per-flow state
 - Label stacking enables traffic engineering and L3VPN services across all sites
 - Ring topology provides path redundancy with automatic failover
@@ -412,7 +412,7 @@ Peer                     AS      InPkt     OutPkt    OutQ   Flaps Last Up/Dwn St
 
 ### Step 2: OSPF Summary Across All Clusters
 
-**Objective:** Verify OSPF adjacencies, SR node SID distribution, and area information across all clusters.
+**Objective:** Verify OSPF adjacencies, SR prefix SID distribution, and area information across all clusters.
 
 **Text Input:** "Check OSPF neighbor adjacencies and database status in all clusters"
 
@@ -440,8 +440,8 @@ Router      6.6.6.6          6.6.6.6          0x8000002d   159  0x22 0x5e73  60
 
 **Analysis Results:**
 - **OSPF Adjacencies**: All neighbors in Full state across clusters with SR capability
-- **LSA Database**: Consistent topology information with SR node SID advertisements
-- **SR-MPLS**: Area 0.0.0.0 stable with 4 SR-enabled routers, SID distribution working
+- **LSA Database**: Consistent topology information with SR prefix SID advertisements
+- **SR-MPLS**: Area 0.0.0.0 stable with 4 SR-enabled routers, prefix SID distribution working
 
 ### Step 3: Interface Statistics from All JCNR Clusters
 
@@ -536,7 +536,7 @@ JCNR Datapath Summary with Route/Next-hop/Flow Analysis + HTTP API + Junos CLI
 **Analysis Results:**
 - **Datapath Health**: All clusters showing healthy SR-MPLS packet forwarding
 - **Route Scale**: Consistent route counts with proper SR label distribution
-- **Protocol Status**: OSPF stable with SR node SID distribution across all clusters
+- **Protocol Status**: OSPF stable with SR prefix SID distribution across all clusters
 - **VPN Services**: SR-MPLS L3VPN routes properly distributed with label stacking
 
 ### Step 5: Specific Route Analysis
