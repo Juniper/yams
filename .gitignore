@@ -52,3 +52,11 @@ htmlcov/
 *.tmp
 *.bak
 .cache/
+
+# Test Files
+test_*.py
+*_test.py
+test_*.sh
+*_test.sh
+automated_mcp_test.py
+simple_mcp_test.py

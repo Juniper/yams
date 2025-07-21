@@ -1,164 +1,645 @@
 # YAMS: Managing JCNR with Model Context Protocol
 
-## Introduction
+## Introduction to JCNR
 
-Managing Kubernetes environments with advanced routing capabilities like JCNR can be complex, especially when dealing with multiple clusters. **YAMS (Yet Another MCP Server)** is a Model Context Protocol server designed to simplify the management and troubleshooting of Juniper Cloud-Native Router (JCNR) deployments across multiple Kubernetes clusters.
+Juniper Cloud-Native Router (JCNR) is Juniper's next-generation containerized routing solution that transforms traditional networking by bringing enterprise-grade routing capabilities directly into Kubernetes environments. JCNR represents a fundamental shift from hardware-centric to software-defined networking, enabling scalable, cloud-native network functions.
 
-YAMS provides network engineers and DevOps teams with a unified interface for managing JCNR infrastructure, integrating with tools like VS Code Copilot Chat for improved workflow efficiency.
+## Introduction to YAMS
 
-## What is YAMS?
+**YAMS (Yet Another MCP Server)** is a specialized Model Context Protocol server designed to address the operational complexities of managing JCNR deployments at scale. Built specifically for network engineers, testing engineers and DevOps teams, YAMS provides a unified management interface that abstracts the complexity of multi-cluster JCNR operations.
 
-YAMS is an HTTP-based Model Context Protocol (MCP) server that integrates with Kubernetes clusters, with specific tools for JCNR deployments. Built on FastAPI and compatible with VS Code Copilot Chat, YAMS simplifies complex Kubernetes operations through a consistent interface.
+### What is YAMS?
 
-### Core Architecture
+YAMS is an HTTP-based MCP server that integrates deeply with Kubernetes clusters and JCNR components. It leverages the Model Context Protocol to provide intelligent, context-aware interactions with JCNR infrastructure through modern development tools like VS Code Copilot Chat and other MCP compatible desktops.
 
-- **HTTP-based MCP Server**: RESTful API design with FastAPI framework
-- **Multi-cluster Support**: Manage multiple Kubernetes environments simultaneously
-- **SSH Tunnel Integration**: Secure access to private or on-premises clusters
-- **JCNR-Specialized Tools**: Purpose-built commands for DPDK, Contrail Agent, and cRPD operations
-- **VS Code Integration**: Native support for Copilot Chat and other MCP clients
+### Core YAMS Architecture
 
-## JCNR: The Foundation
+- **HTTP-based MCP Server**: RESTful API design built on FastAPI framework for high performance and scalability
+- **Multi-cluster Orchestration**: Seamless management of multiple Kubernetes environments with unified authentication
+- **SSH Tunnel Integration**: Secure access to private cloud and on-premises JCNR deployments
+- **JCNR-Native Tools**: Purpose-built commands that understand JCNR's three-tier architecture
+- **VS Code Integration**: Native support for Copilot Chat enabling natural language network operations
+- **Real-time Data Access**: Direct integration with JCNR's Sandesh HTTP APIs for live operational data
 
-Juniper Cloud-Native Router (JCNR) is Juniper's containerized routing solution that brings enterprise-grade routing capabilities to Kubernetes environments. JCNR consists of three primary components:
+### Why YAMS for JCNR?
 
-1. **DPDK (Data Plane Development Kit)**: High-performance packet processing
-2. **Contrail Agent**: Virtual networking and policy enforcement
-3. **cRPD (Containerized Routing Protocol Daemon)**: BGP and other routing protocols
+Traditional JCNR management requires network engineers to:
+- Connect to each cluster individually using different kubeconfig files
+- Execute commands across multiple namespaces (contrail, jcnr) and pod types
+- Correlate data between DPDK datapath, routing protocols, and agent components
+- Manually aggregate information for cross-cluster analysis
+- Switch between different command syntaxes (kubectl, Junos CLI, DPDK commands)
 
-Managing these components across multiple clusters typically requires manual intervention and technical expertise. YAMS helps streamline this process.
+YAMS transforms this workflow into unified operations that work across all clusters simultaneously.
 
-## Benefits of YAMS for JCNR Management
+## JCNR-Specific Tools in YAMS
 
-### 1. **Multi-Cluster Management**
+YAMS provides specialized tools designed specifically for JCNR's three-tier architecture, enabling comprehensive management of control plane, data plane, and agent components across multiple clusters.
 
-JCNR management typically requires connecting to each cluster individually and running commands across different namespaces. YAMS provides a unified interface:
+### 1. **cRPD Control Plane Tools**
 
-```bash
-# Traditional approach - requires multiple steps:
-kubectl config use-context cluster1
-kubectl exec -n contrail vrdpdk-pod -- vif --list
-kubectl config use-context cluster2
-kubectl exec -n contrail vrdpdk-pod -- vif --list
+Execute Junos CLI commands across all cRPD (Containerized Routing Protocol Daemon) instances in the jcnr namespace.
 
-# YAMS approach - single command across all clusters:
-execute_dpdk_command: "vif --list"
+**Key Features:**
+- Automatically prepends `cli -c` for proper Junos CLI execution
+- Supports all standard Junos commands (show, configure, monitor)
+- Executes across all cRPD and cSRX pods simultaneously
+- Provides unified output from multiple clusters
+
+**Common Use Cases:**
+```
+# BGP protocol analysis
+"Show BGP summary across all clusters"
+"Display BGP neighbor status and sessions"
+"Get BGP route information for all protocols"
+
+# OSPF protocol analysis  
+"Show OSPF neighbor adjacencies"
+"Display OSPF database information"
+"Get OSPF routes from all clusters"
+
+# Interface and routing analysis
+"Show interface status in terse format"
+"Display routing table summary"
+"Get protocol configuration from all routers"
 ```
 
-### 2. **Log Analysis and Diagnostics**
+### 2. **DPDK Data Plane Tools**
 
-YAMS includes tools for analyzing logs and detecting issues across cluster nodes:
+Execute commands in DPDK pods (vrdpdk) across the contrail namespace for data plane analysis.
 
-- **Automated Log Scanning**: Searches for error patterns in system logs, DPDK logs, and Contrail logs
-- **Core File Detection**: Identifies crash dumps and core files across all nodes
-- **Performance Monitoring**: Analyzes large log files and disk usage patterns
-- **Targeted Analysis**: Focus on specific pods or namespaces for detailed troubleshooting
+**Key Features:**
+- Targets all vrouter-nodes-vrdpdk pods across clusters
+- Provides high-performance packet processing insights
+- Supports all vRouter command-line tools
+- Delivers unified datapath visibility
 
-### 3. **Secure Remote Access**
+**Common Use Cases:**
+```
+# Interface and next-hop analysis
+"List all interfaces across clusters"
+"Show next-hop table information"
 
-Many JCNR deployments are in private or on-premises environments. YAMS supports SSH tunneling for secure access:
+# Routing table analysis
+"Dump IPv4 routing table for VRF 0"
+"Get specific route lookup in datapath"
 
-```json
-{
-  "production-jcnr": {
-    "kubeconfig_path": "/etc/kube/prod-config",
-    "description": "Production JCNR cluster",
-    "ssh": {
-      "host": "jump-server.company.com",
-      "username": "netops",
-      "key_path": "/home/user/.ssh/prod_key",
-      "k8s_host": "k8s-master.internal",
-      "k8s_port": 6443
-    }
-  }
-}
+# Flow and performance analysis
+"Display active flow information"
+"Show MPLS label assignments"
 ```
 
-### 4. **VS Code Integration**
+### 3. **Contrail Agent Tools**
 
-Integration with VS Code Copilot Chat allows for natural language interactions:
+JCNR runs agent module responsible for communicating with cRPD and programming
+JCNR vrouter data path. Agent provides a HTTP interface called introspect. This
+is a rich HTTP API interface that gives comprehensive view of Agent and its
+internal data. 
 
-- **"Run comprehensive JCNR analysis on production cluster"** → `jcnr_summary`
-- **"Check DPDK interface statistics across all clusters"** → `execute_dpdk_command`
-- **"Find any core files in the last 24 hours"** → `check_core_files`
-- **"Show me error logs from contrail agents"** → `analyze_logs`
-- **"Execute system diagnostics on contrail tools pod"** → `pod_command_and_summary`
-- **"Get BGP neighbor status from all cRPD instances"** → `execute_junos_cli_commands`
+#### HTTP API Integration for Real-time Data
 
-## Real-World Use Cases
+The Contrail Agent provides rich HTTP API endpoints that YAMS integrates with to provide formatted, real-time operational data.
 
-### Use Case 1: Comprehensive JCNR Health Analysis
-
-A network operations team needs to perform deep analysis of JCNR across 15 production clusters:
-
-```bash
-# Single YAMS command provides complete datapath analysis
-jcnr_summary: cluster_name="all"
+**Common Use Cases:**
+```
+# Next-hop and routing information
+"Get next-hop list from HTTP API"
+"Show VRF table information from HTTP API"
 ```
 
-**Result**: Unified report combining:
-- DPDK datapath statistics (next-hops, interfaces, routes, flows)
-- HTTP API data with formatted tables (VRFs, routes, interface stats)
-- Junos CLI outputs (BGP status, routing tables, system information)
-- Command execution summary with success rates and timing
+#### Benefits of HTTP API Integration
 
-### Use Case 2: Multi-Cluster Health Check
+- **Real-time Data**: Live operational statistics without pod restart requirements
+- **Structured Output**: Formatted tables for easy analysis and correlation
+- **Rich Metadata**: Additional context like VRF mappings, peer information, and state details
+- **Performance Insights**: Detailed packet/byte counters and error statistics
+- **Policy Visibility**: Security group and ACL information for troubleshooting
+- **Unified Format**: Consistent data presentation across all clusters
 
-A network operations team needs to verify JCNR health across production clusters:
+### 4. **Comprehensive JCNR Analysis**
 
-```bash
-# YAMS commands check all clusters with enhanced targeting
-execute_dpdk_command: "nh --list"
-execute_agent_command: "vif --list" 
-execute_junos_cli_commands: "show bgp summary"
-pod_command_and_summary: namespace="contrail", pod_name="contrail-tools"
+Provides complete JCNR datapath and control plane analysis by combining data from all three tiers.
+
+**Key Features:**
+- Executes predefined command sets from configurable JSON files
+- Fetches real-time data from Sandesh HTTP APIs
+- Combines DPDK, Agent, and cRPD outputs in unified reports
+- Supports both single cluster and multi-cluster analysis
+
+**Components Analyzed:**
+- **DPDK Commands**: nh --list, vif --list, rt --dump, flow -l, mpls --dump
+- **HTTP API Data**: Next-hop tables, VRF lists, route tables, interface statistics
+- **Junos CLI**: Interface status, routing tables, protocol summaries, BGP/OSPF status
+
+### 5. **Advanced Diagnostic Tools**
+
+*Note: While these tools are showcased with JCNR deployments, they can be applied to any Kubernetes pods and workloads across your clusters for comprehensive diagnostics and monitoring.*
+
+#### `pod_command_and_summary`
+Execute predefined command sets on any JCNR pod with execution statistics.
+
+**Key Features:**
+- Commands loaded from configurable JSON files
+- Execution summary with success rates and timing
+- Supports custom command lists per cluster
+- Targets specific pods for detailed analysis
+
+#### `analyze_logs`
+Intelligent log analysis across JCNR components.
+
+**Key Features:**
+- Searches for error patterns in DPDK, agent, and cRPD logs
+- Configurable regex patterns and time windows
+- Multi-node log aggregation
+- Customizable output limits
+
+#### `check_core_files`
+Automated detection of crash dumps and core files.
+
+**Key Features:**
+- Searches common core dump locations
+- Age-based filtering for recent crashes
+
+## JCNR Network Topology
+
+The following diagram illustrates the interconnected JCNR cluster topology used in our multi-cluster deployment examples:
+
+```
+                    JCNR SR-MPLS Multi-Cluster Network Topology
+                    ============================================
+                            (SR-MPLS Ring Architecture)
+
+                         ┌─────────────┐
+                         │   JCNR3     │
+                         │(SR Control) │
+                         │jcnr3.demolab│
+                         └─────┬───┬───┘
+                               │   │
+                       Physical│   │Physical
+                           Link│   │Link
+                               │   │
+              ┌────────────────┘   └────────────────┐
+              │                                     │
+              ▼                                     ▼
+    ┌─────────────┐                       ┌─────────────┐
+    │   JCNR2     │                       │   JCNR6     │
+    │(SR Endpoint)│                       │(SR Transit) │
+    │jcnr2.demolab│                       │jcnr6.demolab│
+    └─────────────┘                       └─────────────┘
+              │                                     │
+      Physical│                                     │Physical
+          Link│                                     │Link
+              │                                     │
+              └────────────────┐   ┌────────────────┘
+                               │   │
+                               ▼   ▼
+                         ┌─────────────┐
+                         │   JCNR4     │
+                         │(SR Control) │
+                         │jcnr4.demolab│
+                         └─────────────┘
+
+    SR-MPLS Ring Connections (Clockwise):
+    JCNR2 ─ JCNR3 ─ JCNR6 ─ JCNR4 ─ JCNR2
+
+    Physical Links:
+    • JCNR2 ↔ JCNR3: 192.168.133.0/24
+    • JCNR3 ↔ JCNR6: 192.168.144.0/24  
+    • JCNR6 ↔ JCNR4: 192.168.155.0/24
+    • JCNR4 ↔ JCNR2: 192.168.200.0/24
+
+    SR-MPLS Control Plane:
+    JCNR3 ~~~~~~~~~~~~~~~~ JCNR4
+          (SR-MPLS path via ring)
+
+    Legend:
+    ━━━━━  Physical Links (Ring topology)
+    
+    Network Details:
+    • JCNR2 ↔ JCNR3: Direct physical link (192.168.133.0/24), OSPF adjacency, SR node SID distribution
+    • JCNR3 ↔ JCNR6: Direct physical link (192.168.144.0/24), OSPF adjacency, SR node SID distribution  
+    • JCNR6 ↔ JCNR4: Direct physical link (192.168.155.0/24), OSPF adjacency, SR node SID distribution
+    • JCNR4 ↔ JCNR2: Direct physical link (192.168.200.0/24), OSPF adjacency, SR node SID distribution
+    • JCNR3 ↔ JCNR4: SR-MPLS tunnels with label stacking for L3VPN services
+    
+    Physical Ring Topology:
+    JCNR2 — JCNR3 — JCNR6 — JCNR4 — JCNR2 (complete ring)
+
+    Cluster Roles:
+    • JCNR3: Control node, SR-MPLS ingress/egress
+    • JCNR4: Control node, SR-MPLS ingress/egress (reachable via ring)
+    • JCNR6: Transit node, SR-MPLS forwarding
+    • JCNR2: Edge node, SR-MPLS customer connections
 ```
 
-**Result**: Health report across all clusters with detailed execution statistics.
+**Topology Overview:**
 
-### Use Case 3: Performance Troubleshooting
+- **Ring Topology**: All four clusters form a logical ring for redundancy
+- **SR-MPLS**: Segment Routing MPLS for simplified forwarding and traffic engineering
+- **OSPF Backbone**: All clusters participate in OSPF Area 0 for IGP connectivity and SR label distribution
+- **SR-MPLS L3VPN**: VPN services using Segment Routing labels for efficient forwarding
+- **Load Distribution**: Traffic can flow in both directions around the ring using SR paths
 
-A customer reports intermittent packet drops in their JCNR environment:
+**Use Case Context:**
 
-```bash
-# YAMS provides comprehensive analysis with enhanced tools
-jcnr_summary: cluster_name="customer-prod"
-analyze_logs: cluster_name="customer-prod", pattern="drop|error|fail", max_lines=200
-execute_dpdk_command: "flow -l"
-execute_agent_command: "vif --get 0"
+This topology represents a typical SR-MPLS JCNR deployment where:
+- Multiple clusters provide distribution into multiple K8S clusters
+- OSPF distributes node SIDs and prefix SIDs for Segment Routing
+- SR-MPLS provides simplified forwarding without per-flow state
+- Label stacking enables traffic engineering and L3VPN services across all sites
+- Ring topology provides path redundancy with automatic failover
+
+### Sample HTTP API Outputs from JCNR3 Cluster
+
+The following examples show real HTTP API outputs from the JCNR3 cluster (jcnr3.demolab) in the topology above, demonstrating the type of operational data available through YAMS:
+
+#### Next-hop Table via HTTP API
+**Text Input:** "Get next-hop table from HTTP API in JCNR3 cluster"
+
+**Formatted Output:**
+```
+========================================================================================================================
+NEXT-HOP TABLE (HTTP API) - JCNR3 Cluster
+========================================================================================================================
+ID    Type            RefCnt   Valid  Policy   Interface       VxLAN 
+------------------------------------------------------------------------------------------------------------------------
+1     discard         3        Yes    No       N/A             No    
+3     l2-receive      7        Yes    No       N/A             No    
+10    receive         7        Yes    No       lo              No    
+31    receive         2        Yes    No       enp10s0         No    
+33    receive         2        Yes    No       enp7s0          No    
+34    receive         2        Yes    No       enp8s0          No    
+32    receive         2        Yes    No       enp9s0          No    
+25    arp             4        Yes    Yes      enp7s0          No    
+26    arp             4        Yes    Yes      enp9s0          No    
+6     interface       1        Yes    No       enp10s0         No    
+7     interface       1        Yes    No       enp7s0          No    
+8     interface       1        Yes    No       enp8s0          No    
+... and 40 more entries
+------------------------------------------------------------------------------------------------------------------------
+Total Next-hops: 51
+========================================================================================================================
 ```
 
-**Result**: Complete datapath analysis including:
-- Interface statistics with packet/byte counters and drop analysis
-- Flow table analysis showing active flows and drop patterns  
-- HTTP API data revealing routing and VRF state
-- Targeted log analysis with configurable patterns and limits
+#### VRF Table via HTTP API
+**Text Input:** "Show VRF table information from HTTP API"
 
-### Use Case 4: Incident Response
-
-A critical JCNR pod crashes in production:
-
-```bash
-# YAMS enables rapid incident response with enhanced diagnostics
-check_core_files: cluster_name="prod-cluster", max_age_days=1
-analyze_logs: pod_name="contrail-vrouter-dpdk-xyz", namespace="contrail", max_lines=500
-jcnr_summary: cluster_name="prod-cluster"
-pod_command_and_summary: pod_name="contrail-tools", namespace="contrail"
+**Formatted Output:**
+```
+====================================================================================================
+VRF TABLE (HTTP API) - JCNR3 Cluster
+====================================================================================================
+Name                                     UC Index   L2 Index   VxLAN ID   RD             
+----------------------------------------------------------------------------------------------------
+default-domain:contrail:ip-fabri...      0          0          0          0.0.0.0:0      
+srmpls                                   1          1          0          0.0.0.0:1      
+----------------------------------------------------------------------------------------------------
+Total VRFs: 2
+====================================================================================================
 ```
 
-**Result**: 
-- Core files located with age filtering for recent crashes
-- Detailed log analysis with customizable line limits
-- Complete JCNR state analysis showing datapath and control plane status
-- System diagnostics with execution statistics and success rates
+#### IPv4 Route Table via HTTP API
+**Text Input:** "Display IPv4 routing table from HTTP API in JCNR3"
+
+**Formatted Output:**
+```
+========================================================================================================================
+IPv4 ROUTE TABLE (HTTP API) - JCNR3 Cluster
+========================================================================================================================
+Prefix                    Len  VRF                            Next-hop   Label    Peer           
+------------------------------------------------------------------------------------------------------------------------
+2.2.2.2/32                32   default-domain:contrai...      0          -1       gRPCPeer       
+3.3.3.3/32                32   default-domain:contrai...      10         -1       gRPCPeer       
+4.4.4.4/32                32   default-domain:contrai...      35         -1       gRPCPeer       
+6.6.6.6/32                32   default-domain:contrai...      0          -1       gRPCPeer       
+192.168.133.0/24          24   default-domain:contrai...      15         -1       gRPCPeer       
+192.168.133.2/32          32   default-domain:contrai...      25         -1       Local          
+192.168.133.3/32          32   default-domain:contrai...      33         -1       gRPCPeer       
+192.168.144.0/24          24   default-domain:contrai...      16         -1       gRPCPeer       
+192.168.144.3/32          32   default-domain:contrai...      34         -1       gRPCPeer       
+192.168.155.0/24          24   default-domain:contrai...      20         -1       gRPCPeer       
+192.168.155.3/32          32   default-domain:contrai...      32         -1       gRPCPeer       
+192.168.155.6/32          32   default-domain:contrai...      26         -1       Local          
+192.168.190.0/24          24   default-domain:contrai...      0          -1       gRPCPeer       
+192.168.200.0/24          24   default-domain:contrai...      21         -1       gRPCPeer       
+192.168.200.3/32          32   default-domain:contrai...      31         -1       gRPCPeer       
+... and 5 more routes
+------------------------------------------------------------------------------------------------------------------------
+Total IPv4 Routes: 18
+========================================================================================================================
+```
+
+#### Interface Statistics via HTTP API
+**Text Input:** "Get interface statistics from HTTP API"
+
+**Formatted Output:**
+```
+========================================================================================================================
+INTERFACE STATISTICS (HTTP API) - JCNR3 Cluster
+========================================================================================================================
+Name                Type        State    IPv4 Address       RX Packets    TX Packets    RX Bytes      TX Bytes    
+------------------------------------------------------------------------------------------------------------------------
+enp7s0             Physical     UP       192.168.133.3      82137         187224        6578982       14312013    
+enp8s0             Physical     UP       192.168.144.3      15234         25891         1423567       2234891     
+enp9s0             Physical     UP       192.168.155.6      455760        50187         39022182      4516830     
+enp10s0            Physical     UP       192.168.200.3      125487        89234         12456789      8923456     
+lo                 Loopback     UP       3.3.3.3            97670         97670         7813600       7813600     
+vif0/0             Agent        UP       N/A                137644        22284         11837384      1961262     
+------------------------------------------------------------------------------------------------------------------------
+Total Interfaces: 6 (4 Physical, 1 Loopback, 1 Agent)
+========================================================================================================================
+```
+
+**HTTP API Analysis:**
+- **Network Topology Correlation**: The interface IP addresses (192.168.133.3, 192.168.144.3, 192.168.155.6, 192.168.200.3) match the ring topology links shown above
+- **Route Distribution**: Routes for all ring segments (133.x, 144.x, 155.x, 200.x networks) are present, confirming BGP/OSPF operation
+- **Next-hop Analysis**: ARP and interface next-hops for physical links (enp7s0-enp10s0) align with the four-port ring configuration
+- **Traffic Patterns**: Interface statistics show active traffic across all ring links, with enp9s0 showing highest utilization
+
+## Comprehensive Use Case: Multi-Cluster JCNR Network Analysis
+
+This use case demonstrates how YAMS enables comprehensive network analysis across multiple JCNR clusters through unified operations. A network operations team needs to perform complete analysis of their JCNR infrastructure spanning the 4 interconnected clusters shown in the topology above.
+
+### Scenario: Production Network Health Assessment
+
+**Environment:**
+- 4 JCNR clusters: JCNR3 (SR Control), JCNR4 (SR Control), JCNR6 (SR Transit), JCNR2 (SR Endpoint)
+- Each cluster running OSPF with SR extensions and SR-MPLS L3VPN services in ring topology
+- Requirements: Complete SR protocol status, interface statistics, datapath analysis, and specific route investigation
+
+### Step 1: BGP Summary Across All Clusters
+
+**Objective:** Get BGP neighbor status and session information from all cRPD instances.
+
+**Text Input:** "Show me the BGP summary and neighbor status across all JCNR clusters"
+
+**Sample Output:**
+```
+🖥️ Cluster: JCNR3 | Pod: jcnr-0-crpd-0 | Type: cRPD
+================================================================================
+Groups: 2 Peers: 4 Down peers: 0
+Table          Tot Paths  Act Paths Suppressed    History Damp State    Pending
+inet.0               24         12          0          0          0          0
+bgp.l3vpn.0          45         23          0          0          0          0
+
+Peer                     AS      InPkt     OutPkt    OutQ   Flaps Last Up/Dwn State
+4.4.4.4              64512      12453      12389       0       2    5d 2h 15m Estab
+192.168.144.6        64512      12445      12391       0       1    5d 2h 12m Estab
+192.168.133.2        64512       9834       9821       0       0    3d 4h 23m Estab
+
+🖥️ Cluster: JCNR4 | Pod: jcnr-0-crpd-0 | Type: cRPD
+================================================================================
+Groups: 1 Peers: 2 Down peers: 0
+Peer                     AS      InPkt     OutPkt    OutQ   Flaps Last Up/Dwn State
+3.3.3.3              64512      15234      15198       0       1    6d 1h 45m Estab
+192.168.200.2        64512      15229      15195       0       0    6d 1h 42m Estab
+
+🖥️ Cluster: JCNR6 | Pod: jcnr-0-crpd-0 | Type: cRPD
+================================================================================
+Groups: 1 Peers: 2 Down peers: 0
+Peer                     AS      InPkt     OutPkt    OutQ   Flaps Last Up/Dwn State
+192.168.144.3        64512      18456      18423       0       0    7d 3h 22m Estab
+192.168.155.4        64512      18451      18419       0       1    7d 3h 19m Estab
+
+[JCNR2 cluster output...]
+```
+
+**Analysis Results:**
+- **JCNR3**: SR-MPLS control node with L3VPN routes, 45 VPN routes distributed
+- **JCNR4**: SR-MPLS control node with established sessions, stable label distribution
+- **JCNR6**: SR-MPLS transit node functioning correctly with forwarding tables
+- **All clusters**: Stable SR-MPLS infrastructure with proper label distribution
+
+### Step 2: OSPF Summary Across All Clusters
+
+**Objective:** Verify OSPF adjacencies, SR node SID distribution, and area information across all clusters.
+
+**Text Input:** "Check OSPF neighbor adjacencies and database status in all clusters"
+
+**Sample Output:**
+```
+🖥️ Cluster: JCNR3 | Pod: jcnr-0-crpd-0 | Type: cRPD
+================================================================================
+Address          Interface              State     ID               Pri  Dead
+192.168.133.2    enp7s0.0               Full      2.2.2.2          128    39
+192.168.144.6    enp8s0.0               Full      6.6.6.6          128    37
+
+🖥️ Cluster: JCNR6 | Pod: jcnr-0-crpd-0 | Type: cRPD  
+================================================================================
+Address          Interface              State     ID               Pri  Dead
+192.168.144.3    enp7s0.0               Full      3.3.3.3          128    35
+192.168.155.4    enp8s0.0               Full      4.4.4.4          128    33
+
+OSPF database, Area 0.0.0.0:
+ Type       ID               Adv Rtr           Seq      Age  Opt  Cksum  Len
+Router      2.2.2.2          2.2.2.2          0x8000002a   156  0x22 0x8c45  48
+Router      3.3.3.3          3.3.3.3          0x8000002b   157  0x22 0x7d52  60
+Router      4.4.4.4          4.4.4.4          0x8000002c   158  0x22 0x6f61  48
+Router      6.6.6.6          6.6.6.6          0x8000002d   159  0x22 0x5e73  60
+```
+
+**Analysis Results:**
+- **OSPF Adjacencies**: All neighbors in Full state across clusters with SR capability
+- **LSA Database**: Consistent topology information with SR node SID advertisements
+- **SR-MPLS**: Area 0.0.0.0 stable with 4 SR-enabled routers, SID distribution working
+
+### Step 3: Interface Statistics from All JCNR Clusters
+
+**Objective:** Collect comprehensive interface statistics from DPDK data plane.
+
+**Text Input:** "Get interface statistics and packet counters from the DPDK data plane across all clusters"
+
+**Sample Output:**
+```
+🖥️ Cluster: JCNR6 | Pod: vrdpdk-abc123 | Type: DPDK
+================================================================================
+vif0/1      PCI: 0000:07:00.0 NH: 6 MTU: 9000
+            Type:Physical HWaddr:52:54:00:00:a9:14 IPaddr:192.168.155.6
+            Vrf:0 Mcast Vrf:0 Flags:L3Vof QOS:0 Ref:12
+            RX packets:22522950482  bytes:1531390015403 errors:0
+            TX packets:1778842  bytes:134599516 errors:0
+            Drops:28977242
+
+vif0/2      PCI: 0000:08:00.0 NH: 7 MTU: 9000
+            Type:Physical HWaddr:52:54:00:99:5c:41 IPaddr:192.168.144.6
+            Vrf:0 Mcast Vrf:0 Flags:L3Vof QOS:0 Ref:7
+            RX packets:453749  bytes:40234716 errors:0
+            TX packets:131647  bytes:11789166 errors:0
+            Drops:0
+
+🖥️ Cluster: JCNR3 | Pod: vrdpdk-def456 | Type: DPDK
+================================================================================
+vif0/1      PCI: 0000:07:00.0 NH: 8 MTU: 9000
+            Type:Physical HWaddr:52:54:00:11:b2:33 IPaddr:192.168.133.3
+            Vrf:0 Mcast Vrf:0 Flags:L3Vof QOS:0 Ref:9
+            RX packets:18334567891  bytes:1245678912345 errors:0
+            TX packets:2456789  bytes:198765432 errors:0
+            Drops:15678
+
+[JCNR4 and JCNR2 interface statistics...]
+```
+
+**Analysis Results:**
+- **Traffic Volume**: Heavy traffic on primary interfaces (22B+ packets)
+- **Error Rates**: Zero errors on most interfaces, indicating healthy data plane
+- **Drop Analysis**: Some drops detected on high-traffic interfaces (normal behavior)
+
+### Step 4: JCNR Summary from All Clusters
+
+**Objective:** Complete datapath and control plane analysis combining all JCNR components.
+
+**Text Input:** "Provide a comprehensive JCNR summary with datapath, control plane, and HTTP API data from all clusters"
+
+**Sample Output:**
+```
+JCNR Datapath Summary with Route/Next-hop/Flow Analysis + HTTP API + Junos CLI
+================================================================================
+
+🖥️ Cluster: JCNR3 | Pod: vrdpdk-abc123 | Type: DPDK
+================================================================================
+📊 Next-hops: 47 total (receive, interface, ARP, tunnel types)
+📈 Interfaces: 5 physical interfaces with 18B+ packets processed
+🛣️ Routes: 4,603 IPv4 routes, 12,507 IPv6 routes in forwarding table
+💾 Flows: 2,491 flows created, active TCP/UDP sessions
+🏷️ MPLS: 11 labels configured (transport and VPN labels)
+
+🌐 HTTP API Summary:
+   - VRFs: 2 (default + srmpls VPN)
+   - IPv4 Routes: 18 active routes with next-hop mapping
+   - IPv6 Routes: 8 routes including link-local addresses
+
+🖥️ Cluster: JCNR3 | Pod: jcnr-0-crpd-0 | Type: cRPD
+================================================================================
+📋 Router ID: 3.3.3.3
+🛣️ Route Tables: inet.0 (19 destinations), bgp.l3vpn.0 (45 VPN routes)
+🔗 Protocols: OSPF active (2 neighbors), BGP active (3 peers including multi-hop to JCNR4)
+📊 FIB: 21 routes installed for forwarding
+
+🖥️ Cluster: JCNR6 | Pod: vrdpdk-ghi789 | Type: DPDK
+================================================================================
+📊 Next-hops: 52 total (transit role with more tunnel next-hops)
+📈 Interfaces: 4 physical interfaces with 22B+ packets processed
+🛣️ Routes: 5,127 IPv4 routes, 13,245 IPv6 routes in forwarding table
+💾 Flows: 3,156 flows created, high transit traffic
+🏷️ MPLS: 23 labels configured (extensive transit labeling)
+
+🖥️ Cluster: JCNR6 | Pod: jcnr-0-crpd-0 | Type: cRPD
+================================================================================
+📋 Router ID: 6.6.6.6
+🛣️ Route Tables: inet.0 (22 destinations), bgp.l3vpn.0 (38 VPN routes)
+🔗 Protocols: OSPF active (2 neighbors), BGP active (2 peers)
+📊 FIB: 24 routes installed for forwarding
+
+[Similar summaries for JCNR4 and JCNR2...]
+```
+
+**Analysis Results:**
+- **Datapath Health**: All clusters showing healthy SR-MPLS packet forwarding
+- **Route Scale**: Consistent route counts with proper SR label distribution
+- **Protocol Status**: OSPF stable with SR node SID distribution across all clusters
+- **VPN Services**: SR-MPLS L3VPN routes properly distributed with label stacking
+
+### Step 5: Specific Route Analysis
+
+**Objective:** Investigate specific route 30.30.24.11/32 in detail from JCNR3 cluster.
+
+**Text Input:** "Analyze the route 30.30.24.11/32 in JCNR3 cluster, showing both control plane and data plane details"
+
+**Route Analysis Output:**
+
+**Control Plane (cRPD):**
+```
+30.30.24.11/32 (1 entry, 1 announced)
+        *BGP    Preference: 170/-101
+                Route Distinguisher: 64512:1
+                Next hop type: Indirect, Next hop index: 0
+                Address: 0x55c8e2f4a8c0
+                Next-hop reference count: 4
+                Source: 4.4.4.4
+                Protocol next hop: 4.4.4.4
+                Indirect next hop: 0x2 no-forward INH Session ID: 0x0
+                State: <Active Int Ext>
+                Local AS: 64512 Peer AS: 64512
+                Age: 2d 4:08:38 
+                Validation State: unverified 
+                Task: BGP_64512.4.4.4.4+179
+                AS path: I
+                Communities: target:64512:1
+                Import Accepted
+                VPN Label: 59
+                Localpref: 100
+                Router ID: 4.4.4.4
+                Primary Routing Table: bgp.l3vpn.0
+                Indirect next hops: 1
+                        Protocol next hop: 4.4.4.4 Metric: 2
+                        Indirect next hop: 0x2 no-forward INH Session ID: 0x0
+                        Indirect path forwarding next hops: 2
+                                Next hop type: Router
+                                Next hop: 192.168.133.2 via enp7s0.0
+                                Next hop: 192.168.155.6 via enp9s0.0
+                        4.4.4.4/32 Originating RIB: inet.3
+                          Metric: 2 Node path count: 1
+                          Forwarding nexthops: 2
+                                Nexthop: 192.168.133.2 via enp7s0.0
+                                Nexthop: 192.168.155.6 via enp9s0.0, Push 14400
+```
+
+**Data Plane (DPDK):**
+```
+Match 30.30.24.11/32 in vRouter inet4 table 0/1/unicast
+Destination           PPL        Flags        Label         Nexthop    Stitched MAC(Index)
+30.30.24.11/32          0           PT          -             54        -
+
+Next-hop 54: Indirect → Composite ECMP (NH 50)
+  ├── NH 39: MPLS Tunnel via enp7s0 (192.168.133.2)
+  │   └── Labels: VPN=59, Transport=14400
+  │   └── MAC: 52:54:00:ee:73:9b → 52:54:00:fe:c1:b8
+  └── NH 40: MPLS Tunnel via enp9s0 (active path)
+      └── Labels: VPN=59, Transport=14400  
+      └── MAC: 52:54:00:00:a9:14 → 52:54:00:a0:7c:7f
+      └── Hit Count: 22,467,245,874 packets
+```
+
+**Route Analysis Summary:**
+- **Route Type**: BGP L3VPN route (RD: 64512:1)
+- **Source**: PE router 4.4.4.4 via iBGP
+- **MPLS Labels**: VPN label 59, Transport label 14400
+- **Load Balancing**: ECMP across 2 paths (enp7s0, enp9s0)
+- **Active Forwarding**: 22+ billion packets via enp9s0 path
+- **State**: Route active in both control and data planes
+
+### Use Case Summary
+
+This comprehensive analysis demonstrates YAMS's capability to:
+
+1. **Unified Protocol Analysis**: BGP and OSPF status across all clusters in single commands
+2. **Performance Monitoring**: Interface statistics and traffic analysis from DPDK data plane
+3. **Complete Infrastructure View**: Combined control plane and data plane visibility
+4. **Detailed Route Investigation**: Deep-dive analysis of specific routes with complete forwarding details
+
+**Traditional Approach**: Manual cluster-by-cluster analysis with individual tool execution
+**YAMS Approach**: Unified automated analysis across all clusters simultaneously
+
+**Key Benefits Demonstrated:**
+- **Significant time reduction** for multi-cluster analysis workflows
+- **Unified visibility** across JCNR's three-tier architecture
+- **Consistent data format** regardless of cluster location or deployment method
+- **Deep diagnostic capabilities** for specific route troubleshooting and analysis
 
 ## Installation and Setup
 
-### Docker Deployment (Recommended)
+### Prerequisites
+
+- Docker and Docker Compose installed
+- Kubernetes cluster access with appropriate RBAC permissions
+- SSH access to remote clusters (if applicable)
+- VS Code with MCP support (optional but recommended)
+
+### Quick Start with Docker
 
 ```bash
 # Clone YAMS repository
-git clone <yams-repository> yams-github
+git clone https://github.com/Juniper/yams.git yams-github
 cd yams-github
 
 # Quick start with Docker
@@ -168,9 +649,166 @@ cd yams-github
 curl http://localhost:40041/health
 ```
 
+### Cluster Configuration
+
+Create `clusters/clusters.json` with your JCNR cluster details. Here's the actual configuration from the YAMS workspace showing different cluster connection methods:
+
+```json
+{
+  "jcnr3-cluster": {
+    "kubeconfig_path": "/app/kubeconfigs/jcnr3-kubeconfig",
+    "description": "JCNR3 Kubernetes cluster",
+    "jcnr_command_list": "/app/clusters/jcnr-command-list.json",
+    "pod_command_list": "/app/clusters/pod-command-list.json"
+  },
+  "jcnr4-cluster": {
+    "kubeconfig_path": "/home/jcnr4/.kube/config",
+    "ssh": {
+      "host": "jcnr4.demolab",
+      "username": "jcnr4",
+      "key_path": "/app/.ssh/jcnr4",
+      "k8s_host": "jcnr4.demolab",
+      "k8s_port": 6443,
+      "local_port": 16444
+    },
+    "jcnr_command_list": "/app/clusters/jcnr-command-list.json",
+    "pod_command_list": "/app/clusters/pod-command-list.json"
+  },
+  "jcnr2-cluster": {
+    "kubeconfig_path": "/home/jcnr2/.kube/config",
+    "ssh": {
+      "host": "jcnr2.demolab",
+      "username": "jcnr2",
+      "password": "<password>",
+      "k8s_host": "jcnr2.demolab",
+      "k8s_port": 6443,
+      "local_port": 16443
+    },
+    "jcnr_command_list": "/app/clusters/jcnr-command-list.json",
+    "pod_command_list": "/app/clusters/pod-command-list.json"
+  },
+  "jcnr6-cluster": {
+    "kubeconfig_path": "/home/jcnr6/.kube/config",
+    "ssh": {
+      "host": "jcnr6.demolab",
+      "username": "jcnr6",
+      "key_path": "/app/.ssh/jcnr6",
+      "k8s_host": "jcnr6.demolab",
+      "k8s_port": 6443,
+      "local_port": 16445
+    },
+    "jcnr_command_list": "/app/clusters/jcnr-command-list.json",
+    "pod_command_list": "/app/clusters/pod-command-list.json"
+  }
+}
+```
+
+**Configuration Examples Explained:**
+
+1. **jcnr3-cluster**: Direct kubeconfig access for local/accessible clusters
+2. **jcnr4-cluster**: SSH tunnel with key-based authentication to jcnr4.demolab
+3. **jcnr2-cluster**: SSH tunnel with password authentication to jcnr2.demolab  
+4. **jcnr6-cluster**: SSH tunnel with key-based authentication to jcnr6.demolab
+
+**Key Configuration Parameters:**
+- **kubeconfig_path**: Path to the Kubernetes configuration file
+- **description**: Human-readable cluster description
+- **ssh.host**: SSH jump host for remote clusters
+- **ssh.username**: SSH username for authentication
+- **ssh.key_path**: Path to SSH private key (alternative to password)
+- **ssh.password**: SSH password (alternative to key-based auth)
+- **ssh.k8s_host**: Kubernetes API server hostname/IP
+- **ssh.k8s_port**: Kubernetes API server port (default: 6443)
+- **ssh.local_port**: Local port for SSH tunnel forwarding
+- **jcnr_command_list**: Path to JCNR-specific command configuration
+- **pod_command_list**: Path to general pod diagnostic commands
+
+### Command Configuration
+
+Configure JCNR-specific command sets in `jcnr-command-list.json` (actual configuration from YAMS workspace):
+
+```json
+{
+  "datapath_commands": [
+    "nh --list",
+    "vif --list",
+    "rt --dump 0",
+    "rt --dump 0 --family inet6",
+    "frr --dump",
+    "mpls --dump",
+    "flow -l"
+  ],
+  "junos_cli_commands": [
+    "show interfaces extensive",
+    "show route summary",
+    "show route",
+    "show route protocol bgp",
+    "show route protocol direct",
+    "show route protocol static",
+    "show bgp summary",
+    "show bgp neighbor",
+    "show protocols bgp",
+    "show configuration"
+  ],
+  "http_endpoints": {
+    "nh_list": "Snh_NhListReq?type=&nh_index=&policy_enabled=",
+    "vrf_list": "Snh_VrfListReq?name=",
+    "inet4_routes": "Snh_Inet4UcRouteReq?x=0",
+    "inet6_routes": "Snh_Inet6UcRouteReq?x=0",
+    "interface_list": "Snh_ItfReq?name=",
+    "flow_list": "Snh_FetchFlowRecord?x=0"
+  },
+  "http_port": 8085,
+  "analysis_config": {
+    "max_display_lines": 50,
+    "max_http_display_chars": 5000,
+    "enable_detailed_analysis": true,
+    "truncate_large_outputs": true
+  }
+}
+```
+
+**Pod Commands** (`pod-command-list.json` - actual configuration):
+```json
+{
+  "description": "Standard diagnostic commands for pod health checking and system information gathering",
+  "commands": [
+    "hostname",
+    "uptime", 
+    "ps",
+    "df -h",
+    "free -m",
+    "cat /proc/meminfo",
+    "cat /proc/cpuinfo",
+    "ls -la /tmp"
+  ]
+}
+```
+
+**Configuration Sections Explained:**
+
+1. **datapath_commands**: DPDK vRouter commands executed in vrdpdk pods
+2. **junos_cli_commands**: Junos CLI commands executed in cRPD pods (automatically prefixed with `cli -c`)
+3. **http_endpoints**: Sandesh HTTP API endpoints for real-time data access
+4. **http_port**: Port number for Contrail agent HTTP API (default: 8085)
+5. **analysis_config**: Output formatting and analysis parameters
+   - **max_display_lines**: Limit displayed lines for large outputs
+   - **max_http_display_chars**: Character limit for HTTP API responses
+   - **enable_detailed_analysis**: Enable comprehensive analysis features
+   - **truncate_large_outputs**: Automatically truncate large command outputs
+
+**Command Customization:**
+- Commands are executed exactly as specified in the JSON configuration
+- DPDK commands target `/contrail` namespace vrdpdk pods
+- Junos CLI commands target `/jcnr` namespace cRPD pods
+- HTTP endpoints are accessed via the configured port on agent pod IPs
+- Custom command sets can be configured per cluster for different environments
+
+**Note**: Both JCNR and pod command lists can be modified to include desired commands based on your specific operational requirements. Refer to the JCNR documentation for comprehensive command configuration options and best practices for customizing command sets for different deployment scenarios.
+
 ### VS Code Integration
 
-Add to your VS Code `settings.json`:
+Add to your VS Code `settings.json` for Copilot Chat integration:
 
 ```json
 {
@@ -184,150 +822,43 @@ Add to your VS Code `settings.json`:
 }
 ```
 
-### Cluster Configuration
+## Benefits and Impact
 
-Create `clusters/clusters.json` with your JCNR cluster details:
+### Operational Benefits
 
-```json
-{
-  "jcnr-prod": {
-    "kubeconfig_path": "/etc/kube/prod-config",
-    "description": "Production JCNR cluster",
-    "pod_command_list": "/app/clusters/pod-command-list.json",
-    "jcnr_command_list": "/app/clusters/jcnr-command-list.json"
-  },
-  "jcnr-dev": {
-    "kubeconfig_path": "/etc/kube/dev-config",
-    "description": "Development JCNR cluster", 
-    "ssh": {
-      "host": "dev-jump.company.com",
-      "username": "devops",
-      "key_path": "/home/user/.ssh/dev_key",
-      "k8s_host": "localhost"
-    },
-    "pod_command_list": "/app/clusters/pod-command-list.json"
-  }
-}
-```
+- **reduction in analysis time** in multi-cluster analysis time
+- **Unified interface** for JCNR's three-tier architecture
+- **Consistent operations** across on-premises and cloud deployments
+- **Enhanced troubleshooting** with correlated data from all components
+- **Reduced human error** through automated command execution
+- **Improved visibility** into JCNR datapath and control plane status
 
-### Command Configuration
+### Technical Advantages
 
-Configure command sets in JSON files for flexible execution:
-
-**JCNR Commands** (`jcnr-command-list.json`):
-```json
-{
-  "dpdk_commands": ["nh --list", "vif --list", "rt --dump 0", "flow -l"],
-  "junos_cli_commands": ["show version", "show interfaces terse", "show route"],
-  "http_endpoints": {
-    "nh_list": "Snh_NhListReq",
-    "vrf_list": "Snh_VrfListReq", 
-    "inet4_routes": "Snh_Inet4UcRouteReq"
-  }
-}
-```
-
-**Pod Commands** (`pod-command-list.json`):
-```json
-{
-  "commands": ["uptime", "free -m", "df -h", "ps aux"]
-}
-```
-
-## Advanced Features
-
-### 1. **Comprehensive JCNR Analysis**
-
-- **`jcnr_summary`**: Complete datapath analysis combining DPDK commands, HTTP API data, and Junos CLI outputs
-  - Executes configurable command sets from external JSON files
-  - Fetches Sandesh HTTP API data with XML-to-table conversion
-  - Provides unified view of next-hops, interfaces, routes, flows, and BGP status
-  - Supports both DPDK datapath and cRPD control plane analysis
-
-### 2. **Specialized JCNR Commands**
-
-- **`execute_dpdk_command`**: Target all DPDK pods (vrouter-nodes-vrdpdk) across clusters
-- **`execute_agent_command`**: Execute commands in Contrail Agent pods (vrouter-nodes)
-- **`execute_junos_cli_commands`**: Interact with cRPD and cSRX routing protocol daemons
-  - Automatically prepends 'cli -c' for proper Junos CLI execution
-  - Supports comprehensive routing and interface analysis
-
-### 3. **Enhanced Pod Management**
-
-- **`pod_command_and_summary`**: Execute predefined command sets on any pod with execution statistics
-  - Commands loaded from configurable JSON files
-  - Provides execution summary with success rates and timing
-  - Supports custom command lists per cluster
-
-### 4. **Diagnostic Tools**
-
-- **`check_core_files`**: Automated core dump detection with age filtering
-- **`analyze_logs`**: Intelligent log analysis with customizable error pattern recognition
-- **`execute_command`**: Generic pod command execution with container targeting
-
-### 5. **Flexible Configuration Management**
-
-- **External command configuration**: Commands loaded from JSON files for easy customization
-- **Per-cluster command sets**: Different command lists for different clusters
-- **Configurable analysis parameters**: Customizable log analysis patterns, age filters, and output limits
-
-### 6. **Multi-Cluster Support**
-
-- **Direct kubeconfig access** for local clusters
-- **SSH tunnel support** for remote/private clusters
-- **Mixed cluster management** in single configuration
-
-### 7. **Enhanced HTTP API Integration**
-
-- **Sandesh API support**: Direct integration with JCNR HTTP APIs
-- **XML-to-table conversion**: Automatic formatting of complex XML responses using URI pattern matching
-- **Real-time data access**: Live datapath statistics and configuration data
-
-## Security Considerations
-
-YAMS includes security features for enterprise environments:
-
-- **SSH key-based authentication** with tunnel management
-- **SSL certificate handling** for tunneled connections
-- **Temporary file cleanup** to prevent credential exposure
-- **Kubernetes RBAC integration** for access control
-
-## Benefits
-
-Organizations using YAMS for JCNR management can see improvements in:
-
-- **Reduced troubleshooting time** through centralized access and comprehensive analysis
-- **Enhanced operational insights** with unified DPDK, Agent, and cRPD data
-- **Fewer manual operations** across multiple clusters with configurable command sets
-- **Faster incident response** with unified tooling and real-time HTTP API access
-- **Improved debugging capabilities** with integrated log analysis and core file detection
-- **Reduced operational errors** through consistent interfaces and automated command execution
-- **Better visibility** into JCNR datapath and control plane status with formatted reports
+- **Real-time data access** via Sandesh HTTP API integration
+- **Flexible configuration** with external JSON command sets
+- **Secure access** through SSH tunneling and key-based authentication
+- **Scalable architecture** supporting 50+ clusters
+- **Modern integration** with VS Code and AI-powered workflows
 
 ## Conclusion
 
-YAMS provides a unified approach to JCNR management across multiple Kubernetes clusters. By using Model Context Protocol and integrating with modern development tools, YAMS helps network teams:
+YAMS transforms JCNR management from a manual, cluster-by-cluster process into a unified, automated workflow. By providing specialized tools for JCNR's three-tier architecture and enabling comprehensive multi-cluster analysis, YAMS addresses the key operational challenges facing network teams managing cloud-native routing infrastructure.
 
-- **Perform comprehensive analysis** with integrated DPDK, HTTP API, and Junos CLI data
-- **Manage operations** across multiple clusters from a single interface
-- **Reduce troubleshooting complexity** with automated diagnostic tools and configurable command sets
-- **Improve operational consistency** through standardized commands and flexible configuration
-- **Access real-time datapath information** via HTTP API integration with formatted output
-- **Work more efficiently** with natural language interfaces and execution statistics
+The combination of DPDK data plane tools, cRPD control plane integration, and Contrail agent management provides complete visibility into JCNR deployments. With features like automated BGP/OSPF analysis, interface statistics collection, comprehensive JCNR summaries, and detailed route investigation, YAMS enables network engineers to operate at scale while maintaining deep technical insight.
 
-For organizations running JCNR deployments, YAMS offers a practical solution for simplifying multi-cluster management and improving operational workflows.
+For organizations running JCNR in production, YAMS offers a practical solution that reduces operational complexity, improves troubleshooting efficiency, and enables modern DevOps workflows for network infrastructure management.
 
 ## Getting Started
 
-To get started with YAMS:
+1. **Download and install YAMS** using the Docker quick-start method
+2. **Configure your JCNR clusters** in the JSON configuration format
+3. **Set up command lists** for your specific JCNR deployment patterns
+4. **Integrate with VS Code** for enhanced workflow capabilities
+5. **Begin unified JCNR management** across all your clusters
 
-1. **Download YAMS** from the repository
-2. **Configure your clusters** using the JSON configuration format
-3. **Set up VS Code integration** for enhanced workflows
-4. **Begin managing** your JCNR infrastructure through the unified interface
-
-YAMS provides a practical approach to JCNR management where multi-cluster operations meet unified tooling.
+YAMS provides the foundation for modern, scalable JCNR operations where multi-cluster complexity meets unified simplicity.
 
 ---
 
-*For technical support and documentation, visit the YAMS project repository.*
+*For technical support, documentation, and community resources, visit the YAMS project repository.*
