@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Enhanced MCP HTTP Server with Kubernetes Integration
+Enhanced MCP Server with Kubernetes Integration
 
-A Model Context Protocol server that runs over HTTP and provides Kubernetes cluster management.
-This server can connect to remote Kubernetes clusters using kubeconfig files.
+A Model Context Protocol server that supports both HTTP and stdio transports.
+Provides Kubernetes cluster management and can connect to remote clusters using kubeconfig files.
 """
 
 import argparse
@@ -15,20 +15,20 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 import yaml
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server.stdio import stdio_server
+from mcp.types import ServerCapabilities, ToolsCapability, ResourcesCapability
 
 try:
     from kubernetes import client, config
-    from kubernetes.client.rest import ApiException
     from kubernetes.stream import stream
     KUBERNETES_AVAILABLE = True
 except ImportError:
@@ -50,7 +50,12 @@ except ImportError:
     HTTP_AVAILABLE = False
     print("Warning: requests library not available. Install with: pip install requests")
 
-
+# Suppress SSL warnings for SSH tunneled connections
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    pass
 
 # Configure logging
 logging.basicConfig(
@@ -59,7 +64,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # Pydantic models for HTTP requests/responses
 class MCPRequest(BaseModel):
     jsonrpc: str = "2.0"
@@ -67,16 +71,11 @@ class MCPRequest(BaseModel):
     method: str
     params: Optional[Dict[str, Any]] = None
 
-
 class MCPResponse(BaseModel):
     jsonrpc: str = "2.0"
     id: Optional[int] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[Dict[str, Any]] = None
-
-
-
-
 
 class KubernetesManager:
     """Manages Kubernetes cluster connections and operations with SSH tunnel support."""
@@ -1503,13 +1502,37 @@ class XMLTableFormatter:
             return f"Error parsing interface XML: {str(e)}"
 
 
-class EnhancedMCPHTTPServer:
-    """Enhanced HTTP-based MCP Server with Kubernetes and gNMI integration."""
+class EnhancedMCPServer:
+    """Enhanced MCP Server with Kubernetes integration supporting both HTTP and stdio transports."""
     
-    def __init__(self, port: int = 40041, clusters_config_path: str = None):
+    def __init__(self, transport: str = "http", port: int = 40041, clusters_config_path: str = None):
+        self.transport = transport
         self.port = port
+        
+        # Initialize Kubernetes manager
+        self.k8s_manager = KubernetesManager(clusters_config_path)
+        
+        # Initialize the MCP server
+        server_name = f"enhanced-mcp-{transport}-server"
+        self.mcp_server = Server(server_name)
+        
+        # Store handler references
+        self.tools_handler: Optional[Callable[[], Awaitable[List[types.Tool]]]] = None
+        self.call_tool_handler: Optional[Callable[[str, Dict[str, Any]], Awaitable[List[types.TextContent]]]] = None
+        self.resources_handler: Optional[Callable[[], Awaitable[List[types.Resource]]]] = None
+        self.read_resource_handler: Optional[Callable[[str], Awaitable[str]]] = None
+        
+        self._setup_mcp_handlers()
+        
+        # Setup transport-specific components
+        if self.transport == "http":
+            self._setup_http_components()
+        # stdio setup will be handled in the start method
+    
+    def _setup_http_components(self):
+        """Set up HTTP-specific components (FastAPI app, routes, etc.)."""
         self.app = FastAPI(
-            title="Enhanced MCP HTTP Server with Kubernetes",
+            title="Enhanced MCP Server with Kubernetes",
             description="Model Context Protocol server with Kubernetes cluster management",
             version="2.1.0"
         )
@@ -1523,19 +1546,6 @@ class EnhancedMCPHTTPServer:
             allow_headers=["*"],
         )
         
-        # Initialize Kubernetes manager
-        self.k8s_manager = KubernetesManager(clusters_config_path)
-        
-        # Initialize the MCP server
-        self.mcp_server = Server("enhanced-mcp-http-server")
-        
-        # Store handler references
-        self.tools_handler: Optional[Callable[[], Awaitable[List[types.Tool]]]] = None
-        self.call_tool_handler: Optional[Callable[[str, Dict[str, Any]], Awaitable[List[types.TextContent]]]] = None
-        self.resources_handler: Optional[Callable[[], Awaitable[List[types.Resource]]]] = None
-        self.read_resource_handler: Optional[Callable[[str], Awaitable[str]]] = None
-        
-        self._setup_mcp_handlers()
         self._setup_http_routes()
     
     def _setup_mcp_handlers(self):
@@ -2877,11 +2887,26 @@ The server will use the default kubeconfig if no cluster name is specified.
                 return MCPResponse(id=request.id, error=error)
     
     async def start(self):
-        """Start the HTTP server."""
-        logger.info(f"Starting Enhanced MCP HTTP Server on port {self.port}")
+        """Start the MCP server in the configured transport mode."""
+        logger.info(f"Starting Enhanced MCP Server with {self.transport} transport")
         logger.info(f"Kubernetes support: {KUBERNETES_AVAILABLE}")
         logger.info(f"SSH tunnel support: {SSH_AVAILABLE}")
         logger.info(f"Configured clusters: {len(self.k8s_manager.clusters_config)}")
+        
+        try:
+            if self.transport == "http":
+                await self._start_http_server()
+            elif self.transport == "stdio":
+                await self._start_stdio_server()
+            else:
+                raise ValueError(f"Unsupported transport: {self.transport}")
+        finally:
+            # Clean up SSH tunnels on shutdown
+            self.k8s_manager.close_ssh_tunnels()
+    
+    async def _start_http_server(self):
+        """Start the HTTP server."""
+        logger.info(f"Starting HTTP server on port {self.port}")
         
         config = uvicorn.Config(
             app=self.app,
@@ -2891,33 +2916,55 @@ The server will use the default kubeconfig if no cluster name is specified.
         )
         
         server = uvicorn.Server(config)
+        await server.serve()
+    
+    async def _start_stdio_server(self):
+        """Start the stdio server."""
+        logger.info("Starting stdio server")
+                
+        capabilities = ServerCapabilities(
+            tools=ToolsCapability(listChanged=True),
+            resources=ResourcesCapability(subscribe=True, listChanged=True)
+        )
         
-        try:
-            await server.serve()
-        finally:
-            # Clean up SSH tunnels on shutdown
-            self.k8s_manager.close_ssh_tunnels()
+        init_options = InitializationOptions(
+            server_name=f"enhanced-mcp-{self.transport}-server",
+            server_version="2.1.0",
+            capabilities=capabilities
+        )
+        
+        # Run the MCP server with stdio transport
+        async with stdio_server() as (read_stream, write_stream):
+            await self.mcp_server.run(read_stream, write_stream, init_options)
 
 
 async def main():
-    """Main function to run the Enhanced MCP HTTP server."""
-    parser = argparse.ArgumentParser(description="Enhanced MCP HTTP Server with Kubernetes")
+    """Main function to run the Enhanced MCP server."""
+    parser = argparse.ArgumentParser(description="Enhanced MCP Server with Kubernetes")
+    parser.add_argument(
+        "--transport",
+        type=str,
+        choices=["http", "stdio"],
+        default="http",
+        help="Transport protocol to use (default: http)"
+    )
     parser.add_argument(
         "--port", 
         type=int, 
         default=40041,
-        help="Port to run the server on (default: 40041)"
+        help="Port to run the HTTP server on (default: 40041, ignored for stdio)"
     )
     parser.add_argument(
         "--clusters-config",
         type=str,
         help="Path to JSON file containing cluster configurations"
     )
-    
+
     args = parser.parse_args()
     
     # Create and start the server
-    server = EnhancedMCPHTTPServer(
+    server = EnhancedMCPServer(
+        transport=args.transport,
         port=args.port, 
         clusters_config_path=args.clusters_config
     )

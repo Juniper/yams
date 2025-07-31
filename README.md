@@ -1,6 +1,6 @@
 # YAMS (Yet Another MCP Server)
 
-**YAMS** is a powerful Model Context Protocol (MCP) server designed for analyzing services running on Kubernetes clusters. Built with FastAPI, YAMS provides seamless integration with VS Code Copilot Chat and other MCP-compatible tools.
+**YAMS** is a powerful Model Context Protocol (MCP) server designed for analyzing services running on Kubernetes clusters. YAMS supports both **HTTP** and **stdio** transport modes, providing seamless integration with VS Code Copilot Chat and other MCP-compatible tools.
 
 ## What is YAMS?
 
@@ -8,6 +8,7 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
 
 ### Key Capabilities
 
+- **Dual Transport Support**: HTTP transport (default) for web clients and stdio transport for VS Code Copilot Chat and other MCP-compatible tools
 - **Multi-cluster Management**: Connect to multiple Kubernetes clusters simultaneously
 - **Flexible Access Methods**: Direct kubeconfig access or SSH tunnel connections for remote clusters
 - **Generic Kubernetes Operations**: List clusters, namespaces, pods, and execute commands in any pod
@@ -22,7 +23,8 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
 
 ## Features
 
-- HTTP-based MCP server using FastAPI
+- **Dual Transport Support**: HTTP transport (default) and stdio transport for different integration needs
+- MCP server built with FastAPI for HTTP mode and native stdio support
 - Kubernetes integration with kubeconfig support
 - SSH tunnel support for remote cluster access
 - **Generic Tools**: `list_clusters`, `list_namespaces`, `list_pods`, `execute_command`, `pod_command_and_summary`
@@ -37,7 +39,6 @@ YAMS is a **generic Kubernetes management tool** that can connect to any Kuberne
   - XML-to-table formatting for Sandesh HTTP API responses
   - Multi-cluster datapath correlation analysis
   - Automated JCNR component discovery
-- VS Code Copilot Chat compatible
 - CORS support and health check endpoint
 
 ## Configuration
@@ -195,6 +196,9 @@ curl http://localhost:40041/health
 ### Option B: Local Python Installation
 
 ```bash
+# Lets go to YAMS directory
+cd /path/to/yams
+
 # Create virtual environment (recommended)
 python -m venv venv
 source venv/bin/activate  # On macOS/Linux
@@ -206,14 +210,13 @@ pip install -r requirements.txt
 
 **With Local Python:**
 ```bash
-# Start server with Kubernetes sources
-python enhanced_mcp_server.py --port 40041 --clusters-config clusters.json
+# Start server with Kubernetes sources using HTTP transport (default)
+python enhanced_mcp_server.py --port 40041 --clusters-config clusters/clusters.json
 ```
 
 ## Configure VS Code
 
-Add to your VS Code `settings.json`:
-
+**For HTTP transport (default):**
 ```json
 {
   "mcp": {
@@ -225,12 +228,28 @@ Add to your VS Code `settings.json`:
   }
 }
 ```
+
+**For stdio transport (recommended for VS Code):**
+```json
+{
+  "yams-mcp-stdio-server": {
+      "type": "stdio",
+      "command": "/path/to/yams/run_mcp_stdio.sh",
+      "args": [
+          "/path/to/yams",
+          "/path/to/yams/clusters/clusters-stdio.json",
+          "/path/to/yams/venv"
+      ]
+  }
+}
+```
 ## Command Line Options
 
-- `--port`: Port to run the server on (default: 40041)
+- `--transport`: Transport mode - `http` (default) or `stdio`
+- `--port`: Port to run the HTTP server on (default: 40041, ignored for stdio)
 - `--clusters-config`: Path to JSON file containing cluster configurations
 
-## API Endpoints
+## API Endpoints (HTTP Transport Only)
 
 - `GET /`: Server information and available endpoints
 - `GET /health`: Health check endpoint
@@ -238,8 +257,10 @@ Add to your VS Code `settings.json`:
 
 ## MCP Protocol Support
 
-This server implements the Model Context Protocol over HTTP and supports:
+This server implements the Model Context Protocol with support for both transports:
 
+- **HTTP Transport**: RESTful API endpoints for web clients and testing
+- **stdio Transport**: Direct stdin/stdout communication
 - **Tools**: Callable functions that can be invoked by the client
 - **Resources**: Readable content that can be accessed by URI
 - **Initialization**: Proper MCP handshake and capability negotiation
