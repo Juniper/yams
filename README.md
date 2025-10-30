@@ -561,20 +561,211 @@ When configuring SSH tunnel access, include an `ssh` object within your cluster 
 }
 ```
 
-### Configuration Files
+## Pod Command Configuration
 
-- `clusters-sample.json` - Comprehensive example with multiple environments
+The `pod_command_list` configuration enables intelligent, pod-specific diagnostic command execution through the `pod_command_and_summary` tool.
 
-## VS Code Integration
+### Configuration File Structure
 
-### Using VS Code Tasks
+Create a JSON file with pod-specific command configurations:
 
-Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) and type "Tasks: Run Task" to access predefined tasks:
+```json
+{
+  "description": "Enhanced pod-specific diagnostic commands with pattern matching support",
+  "pod_configurations": [
+    {
+      "pod_name": "nginx-*",
+      "namespace": "default",
+      "description": "Nginx web server diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep nginx",
+        "nginx -t",
+        "nginx -V",
+        "curl -I http://localhost",
+        "df -h",
+        "free -m",
+        "netstat -tulpn | grep :80",
+        "ls -la /var/log/nginx/",
+        "tail -20 /var/log/nginx/access.log",
+        "tail -20 /var/log/nginx/error.log"
+      ]
+    },
+    {
+      "pod_name": "redis-*",
+      "namespace": "default",
+      "description": "Redis cache server diagnostic commands",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep redis",
+        "redis-cli ping",
+        "redis-cli info memory",
+        "redis-cli info stats",
+        "redis-cli config get '*'",
+        "df -h",
+        "free -m",
+        "netstat -tulpn | grep :6379"
+      ]
+    },
+    {
+      "pod_name": "*",
+      "namespace": "*",
+      "description": "Generic pod diagnostic commands (fallback)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | head -20",
+        "df -h",
+        "free -m",
+        "env | grep -E 'PATH|HOME|USER|KUBERNETES'",
+        "ip addr show",
+        "netstat -tulpn | head -10"
+      ]
+    }
+  ],
+  "execution_options": {
+    "timeout_seconds": 30,
+    "max_output_size": 1048576,
+    "retry_count": 1,
+    "parallel_execution": false,
+    "continue_on_error": true
+  }
+}
+```
 
-- **Install Dependencies**: Installs all required Python packages
-- **Start MCP Server**: Starts the server with default configuration
-- **Test Server Health**: Tests if the server is responding
-- **Setup Virtual Environment**: Creates a Python virtual environment
+### Pod Name Matching System
+
+The system uses intelligent pattern matching to select appropriate command sets:
+
+#### 1. **Exact Match**
+```json
+{
+  "pod_name": "nginx-deployment-abc123",
+  "namespace": "default",
+  "commands": ["specific", "commands", "for", "this", "exact", "pod"]
+}
+```
+
+#### 2. **Wildcard Pattern Match**
+```json
+{
+  "pod_name": "nginx-*",
+  "namespace": "default",
+  "commands": ["commands", "for", "any", "nginx", "pod"]
+}
+```
+
+#### 3. **Universal Fallback**
+```json
+{
+  "pod_name": "*",
+  "namespace": "*",
+  "commands": ["generic", "commands", "for", "any", "pod"]
+}
+```
+
+### Command Selection Priority
+
+When executing `pod_command_and_summary`, the system follows this selection logic:
+
+1. **Exact Match**: Look for exact pod name and namespace match
+2. **Pattern Match**: Find wildcard patterns that match the pod name  
+3. **Fallback**: Use the first configuration if no matches found
+4. **Universal**: Use `*` pattern as final fallback
+
+**Example**: For pod `nginx-deployment-abc123` in namespace `default`:
+1. Try exact match: `nginx-deployment-abc123` 
+2. Try pattern match: `nginx-*`
+3. Fallback to first config or `*` pattern
+
+### Execution Options
+
+Configure command execution behavior globally:
+
+```json
+"execution_options": {
+  "timeout_seconds": 30,           // Command execution timeout
+  "max_output_size": 1048576,      // Max output size in bytes (1MB)
+  "retry_count": 1,                // Number of retry attempts on failure
+  "parallel_execution": false,     // Execute commands in parallel (not implemented)
+  "continue_on_error": true        // Continue if one command fails
+}
+```
+
+### Usage Examples
+
+#### Execute pod-specific commands
+```bash
+# The system automatically selects appropriate commands based on pod name
+curl -X POST http://127.0.0.1:40041/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "pod_command_and_summary",
+      "arguments": {
+        "pod_name": "nginx-deployment-abc123",
+        "namespace": "default",
+        "cluster_name": "production"
+      }
+    }
+  }'
+```
+
+### Command Output Summary
+
+The tool provides detailed execution statistics:
+
+```
+Command Execution Summary
+=========================
+Pod: nginx-deployment-abc123
+Namespace: default
+Container: nginx
+Cluster: production
+Command Source: cluster_config: /path/to/pod-command-list.json
+
+Execution Options:
+  Timeout: 30s
+  Max Output Size: 1048576 bytes
+  Retry Count: 1
+  Continue on Error: true
+
+✓ Command 1: nginx -t (success, 5 lines, 245 bytes)
+   Execution Time: 0.12s
+   First line: nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+   Last line: nginx: configuration file /etc/nginx/nginx.conf test is successful
+
+✓ Command 2: ps aux | grep nginx (success, 8 lines, 456 bytes)
+   Execution Time: 0.08s
+   First line: root      1234  0.0  0.1 123456  7890 ?        Ss   10:30   0:00 nginx: master
+   Last line: www-data   1251  0.0  0.0  12345   890 pts/0    S+   10:31   0:00 grep nginx
+
+Commands executed: 12
+Successful: 11
+Failed: 1
+Success rate: 91.7%
+```
+
+### Integration with Clusters
+
+Reference your pod command list in the cluster configuration:
+
+```json
+{
+  "production": {
+    "kubeconfig_path": "/path/to/kubeconfig",
+    "pod_command_list": "clusters/pod-command-list.json",
+    "description": "Production cluster with enhanced pod diagnostics"
+  }
+}
+```
+
+This intelligent command selection system ensures that each pod type receives appropriate diagnostic commands, making troubleshooting more efficient and targeted.
 
 ## Security Considerations
 
@@ -664,12 +855,4 @@ cp ~/.kube/staging-cluster ./kubeconfigs/
 # Set proper permissions  
 chmod 600 ./kubeconfigs/*
 ```
-
-### Volume Mount Details
-
-| Host Directory | Container Path | Purpose | Access Mode |
-|---------------|----------------|---------|-------------|
-| `./clusters/` | `/app/clusters/` | Active cluster configurations | Read-Write |
-| `./sshkeys/` | `/app/.ssh/` | SSH private keys for tunneling | Read-Only |
-| `./kubeconfigs/` | `/app/kubeconfigs/` | Kubernetes configuration files | Read-Only |
 

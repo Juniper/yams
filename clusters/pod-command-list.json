@@ -1,13 +1,127 @@
 {
-  "description": "Standard diagnostic commands for pod health checking and system information gathering",
-  "commands": [
-    "hostname",
-    "uptime", 
-    "ps",
-    "df -h",
-    "free -m",
-    "cat /proc/meminfo",
-    "cat /proc/cpuinfo",
-    "ls -la /tmp"
-  ]
+  "description": "Enhanced pod-specific diagnostic commands with pattern matching support",
+  "pod_configurations": [
+    {
+      "pod_name": "nginx-*",
+      "namespace": "default",
+      "description": "Nginx web server diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep nginx",
+        "nginx -t",
+        "nginx -V",
+        "curl -I http://localhost",
+        "df -h",
+        "free -m",
+        "netstat -tulpn | grep :80",
+        "ls -la /var/log/nginx/",
+        "tail -20 /var/log/nginx/access.log",
+        "tail -20 /var/log/nginx/error.log"
+      ]
+    },
+    {
+      "pod_name": "redis-*",
+      "namespace": "default",
+      "description": "Redis cache server diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep redis",
+        "redis-cli ping",
+        "redis-cli info memory",
+        "redis-cli info stats",
+        "redis-cli config get '*'",
+        "df -h",
+        "free -m",
+        "netstat -tulpn | grep :6379",
+        "cat /proc/meminfo | grep -E 'MemTotal|MemFree|MemAvailable'"
+      ]
+    },
+    {
+      "pod_name": "mysql-*",
+      "namespace": "default",
+      "description": "MySQL database diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep mysql",
+        "mysql --version",
+        "mysqladmin ping",
+        "mysqladmin status",
+        "mysql -e \"SHOW STATUS LIKE 'Connections'\"",
+        "mysql -e \"SHOW VARIABLES LIKE 'max_connections'\"",
+        "df -h",
+        "free -m",
+        "netstat -tulpn | grep :3306"
+      ]
+    },
+    {
+      "pod_name": "*kube-proxy*",
+      "namespace": "kube-system",
+      "description": "Kubernetes proxy diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep kube-proxy",
+        "iptables -t nat -L | head -20",
+        "ip route show",
+        "netstat -tulpn | grep -E ':10256|:10249'",
+        "df -h",
+        "free -m"
+      ]
+    },
+    {
+      "pod_name": "coredns-*",
+      "namespace": "kube-system",
+      "description": "CoreDNS diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep coredns",
+        "nslookup kubernetes.default.svc.cluster.local 127.0.0.1",
+        "dig @127.0.0.1 kubernetes.default.svc.cluster.local",
+        "netstat -tulpn | grep :53",
+        "df -h",
+        "free -m"
+      ]
+    },
+    {
+      "pod_name": "etcd-*",
+      "namespace": "kube-system",
+      "description": "etcd diagnostic commands (pattern match)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | grep etcd",
+        "etcdctl cluster-health",
+        "etcdctl member list",
+        "netstat -tulpn | grep :2379",
+        "df -h",
+        "free -m"
+      ]
+    },
+    {
+      "pod_name": "*",
+      "namespace": "*",
+      "description": "Generic pod diagnostic commands (universal fallback)",
+      "commands": [
+        "hostname",
+        "uptime",
+        "ps aux | head -20",
+        "df -h",
+        "free -m",
+        "env | grep -E 'PATH|HOME|USER|KUBERNETES'",
+        "ip addr show",
+        "netstat -tulpn | head -10"
+      ]
+    }
+  ],
+  "execution_options": {
+    "timeout_seconds": 30,
+    "max_output_size": 1048576,
+    "retry_count": 1,
+    "parallel_execution": false,
+    "continue_on_error": true
+  }
 }

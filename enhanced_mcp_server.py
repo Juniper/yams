@@ -952,8 +952,9 @@ class KubernetesManager:
                 result["error"] = f"No pod_command_list configured for cluster '{cluster_name}'. This tool requires a pod_command_list field in the cluster configuration."
                 return result
                 
-            final_commands = self._load_commands_from_file(command_list_path)
+            final_commands, execution_options = self._load_commands_from_file(command_list_path, pod_name, namespace)
             result["command_source"] = f"cluster_config: {command_list_path}"
+            result["execution_options"] = execution_options
             
         except Exception as e:
             result["error"] = f"Failed to load commands from cluster configuration: {str(e)}"
@@ -966,6 +967,12 @@ class KubernetesManager:
         result["commands_to_execute"] = final_commands
         start_time = time.time()
         
+        # Get execution options
+        timeout_seconds = execution_options.get("timeout_seconds", 30)
+        max_output_size = execution_options.get("max_output_size", 1048576)
+        retry_count = execution_options.get("retry_count", 1)
+        continue_on_error = execution_options.get("continue_on_error", True)
+        
         try:
             for i, command in enumerate(final_commands, 1):
                 cmd_result = {
@@ -974,48 +981,80 @@ class KubernetesManager:
                     "status": "unknown",
                     "output_size_bytes": 0,
                     "output_lines": 0,
-                    "output_preview": {}
+                    "output_preview": {},
+                    "execution_time": 0,
+                    "retry_attempts": 0
                 }
                 
-                try:
-                    # Execute the command
-                    response = self.execute_pod_command(pod_name, namespace, command, container, cluster_name)
-                    
-                    result["commands_executed"] += 1
-                    
-                    if response.get("status") == "success":
-                        result["commands_successful"] += 1
-                        cmd_result["status"] = "success"
+                # Execute command with retry logic
+                success = False
+                for attempt in range(retry_count + 1):
+                    try:
+                        cmd_start_time = time.time()
                         
-                        output = response.get("output", "")
-                        cmd_result["output_size_bytes"] = len(output.encode('utf-8'))
-                        result["total_output_size_bytes"] += cmd_result["output_size_bytes"]
+                        # Execute the command with timeout consideration
+                        response = self._execute_pod_command_with_options(
+                            pod_name, namespace, command, container, cluster_name,
+                            timeout_seconds, max_output_size
+                        )
                         
-                        # Count lines and create preview
-                        lines = output.strip().split('\n') if output.strip() else []
-                        cmd_result["output_lines"] = len(lines)
+                        cmd_end_time = time.time()
+                        cmd_result["execution_time"] = round(cmd_end_time - cmd_start_time, 2)
+                        cmd_result["retry_attempts"] = attempt
                         
-                        # Create output preview
-                        if lines:
-                            if len(lines) <= 3:
-                                cmd_result["output_preview"]["content"] = output.strip()
-                            else:
-                                cmd_result["output_preview"]["first_line"] = lines[0] if lines else ""
-                                cmd_result["output_preview"]["last_line"] = lines[-1] if lines else ""
-                                cmd_result["output_preview"]["total_lines"] = len(lines)
-                            cmd_result["full_output_available"] = len(lines) > 3
+                        result["commands_executed"] += 1
                         
-                    else:
-                        result["commands_failed"] += 1
-                        cmd_result["status"] = "failed"
-                        cmd_result["error"] = response.get("output", "Unknown error")
-                        
-                except Exception as e:
-                    result["commands_failed"] += 1
-                    cmd_result["status"] = "error" 
-                    cmd_result["error"] = str(e)
+                        if response.get("status") == "success":
+                            result["commands_successful"] += 1
+                            cmd_result["status"] = "success"
+                            success = True
+                            
+                            output = response.get("output", "")
+                            
+                            # Apply output size limit
+                            if len(output.encode('utf-8')) > max_output_size:
+                                output = output[:max_output_size] + "... [OUTPUT TRUNCATED DUE TO SIZE LIMIT]"
+                                cmd_result["output_truncated"] = True
+                            
+                            cmd_result["output_size_bytes"] = len(output.encode('utf-8'))
+                            result["total_output_size_bytes"] += cmd_result["output_size_bytes"]
+                            
+                            # Count lines and create preview
+                            lines = output.strip().split('\n') if output.strip() else []
+                            cmd_result["output_lines"] = len(lines)
+                            
+                            # Create output preview
+                            if lines:
+                                if len(lines) <= 3:
+                                    cmd_result["output_preview"]["content"] = output.strip()
+                                else:
+                                    cmd_result["output_preview"]["first_line"] = lines[0] if lines else ""
+                                    cmd_result["output_preview"]["last_line"] = lines[-1] if lines else ""
+                                    cmd_result["output_preview"]["total_lines"] = len(lines)
+                                cmd_result["full_output_available"] = len(lines) > 3
+                            
+                            break  # Success, exit retry loop
+                            
+                        else:
+                            if attempt == retry_count:  # Last attempt
+                                result["commands_failed"] += 1
+                                cmd_result["status"] = "failed"
+                                cmd_result["error"] = response.get("output", "Unknown error")
+                            # Continue to next retry attempt
+                            
+                    except Exception as e:
+                        if attempt == retry_count:  # Last attempt
+                            result["commands_failed"] += 1
+                            cmd_result["status"] = "error" 
+                            cmd_result["error"] = str(e)
+                        # Continue to next retry attempt
                 
                 result["results"].append(cmd_result)
+                
+                # If continue_on_error is False and this command failed, stop execution
+                if not continue_on_error and not success:
+                    logger.info(f"Stopping execution due to failed command (continue_on_error=False): {command}")
+                    break
             
             # Calculate execution time and success rate
             end_time = time.time()
@@ -1033,17 +1072,20 @@ class KubernetesManager:
         
         return result
 
-    def _load_commands_from_file(self, file_path: str) -> List[str]:
+    def _load_commands_from_file(self, file_path: str, target_pod_name: str = None, target_namespace: str = None) -> tuple[List[str], Dict[str, Any]]:
         """Load commands from a JSON file containing either:
         1. A simple list of command strings: ["cmd1", "cmd2", ...]
         2. An object with description and commands: {"description": "...", "commands": ["cmd1", "cmd2", ...]}
         3. A list of objects with command/description: [{"command": "cmd", "description": "desc"}, ...]
+        4. Pod-specific configurations: {"pod_configurations": [{"pod_name": "...", "commands": [...]}]}
         
         Args:
             file_path: Path to the JSON file containing the command list
+            target_pod_name: Name of the pod to find commands for (optional)
+            target_namespace: Namespace of the pod (optional)
             
         Returns:
-            List of command strings
+            Tuple of (commands list, execution_options dict)
             
         Raises:
             Exception: If file cannot be read or parsed
@@ -1057,6 +1099,13 @@ class KubernetesManager:
                 data = json.load(f)
             
             commands = []
+            execution_options = {
+                "timeout_seconds": 30,
+                "max_output_size": 1048576,
+                "retry_count": 1,
+                "parallel_execution": False,
+                "continue_on_error": True
+            }
             
             if isinstance(data, list):
                 # Handle list format (legacy or enhanced)
@@ -1071,22 +1120,49 @@ class KubernetesManager:
                         raise ValueError(f"Invalid command format: {item}")
             
             elif isinstance(data, dict):
-                # Handle object format with description and commands array
-                if 'commands' in data:
+                # Check for pod-specific configurations first
+                if 'pod_configurations' in data:
+                    pod_configs = data['pod_configurations']
+                    
+                    # Extract execution options if present
+                    if 'execution_options' in data:
+                        execution_options.update(data['execution_options'])
+                    
+                    # If target pod is specified, try to find matching configuration
+                    if target_pod_name and target_namespace:
+                        for config in pod_configs:
+                            config_pod_name = config.get('pod_name', '')
+                            config_namespace = config.get('namespace', '')
+                            
+                            # Exact match or pattern match
+                            if ((config_pod_name == target_pod_name or 
+                                 self._pod_name_matches_pattern(target_pod_name, config_pod_name)) and
+                                config_namespace == target_namespace):
+                                commands = config.get('commands', [])
+                                logger.info(f"Found matching pod configuration for {target_pod_name} in {target_namespace}")
+                                break
+                    
+                    # If no specific match found, use the first configuration as fallback
+                    if not commands and pod_configs:
+                        commands = pod_configs[0].get('commands', [])
+                        logger.info(f"Using fallback commands from first pod configuration")
+                
+                # Handle legacy object format with description and commands array
+                elif 'commands' in data:
                     command_list = data['commands']
                     if isinstance(command_list, list):
                         commands = [str(cmd) for cmd in command_list if cmd]
                     else:
                         raise ValueError(f"'commands' field must be a list, got {type(command_list)}")
                 else:
-                    raise ValueError("Object format must contain 'commands' field")
+                    raise ValueError("Object format must contain either 'pod_configurations' or 'commands' field")
             
             else:
                 raise ValueError(f"Expected a list or object with commands, got {type(data)}")
             
-            # Filter out empty commands
-            commands = [cmd.strip() for cmd in commands if cmd and cmd.strip()]
-            return commands
+            # Filter out empty commands and ensure they are strings
+            commands = [str(cmd).strip() for cmd in commands if cmd and str(cmd).strip()]
+            return commands, execution_options
                 
         except FileNotFoundError:
             raise Exception(f"Command file not found: {file_path}")
@@ -1094,6 +1170,112 @@ class KubernetesManager:
             raise Exception(f"Invalid JSON in command file {file_path}: {str(e)}")
         except Exception as e:
             raise Exception(f"Error loading commands from {file_path}: {str(e)}")
+    
+    def _pod_name_matches_pattern(self, pod_name: str, pattern: str) -> bool:
+        """Check if a pod name matches a pattern (supports wildcards)."""
+        import fnmatch
+        return fnmatch.fnmatch(pod_name, pattern)
+
+    def _execute_pod_command_with_options(self, pod_name: str, namespace: str, command: str, 
+                                        container: str = None, cluster_name: str = None,
+                                        timeout_seconds: int = 30, max_output_size: int = 1048576) -> Dict[str, Any]:
+        """Execute a command in a pod with specific execution options."""
+        try:
+            if not KUBERNETES_AVAILABLE:
+                raise Exception("Kubernetes library not available")
+            
+            k8s_client = self.get_k8s_client(cluster_name)
+            
+            # Check if pod exists
+            try:
+                pod = k8s_client.read_namespaced_pod(name=pod_name, namespace=namespace)
+            except Exception as e:
+                raise Exception(f"Pod '{pod_name}' not found in namespace '{namespace}': {str(e)}")
+            
+            # If no container specified, use the first container
+            if not container and pod.spec.containers:
+                container = pod.spec.containers[0].name
+            elif not container:
+                raise Exception(f"No containers found in pod '{pod_name}'")
+            
+            # Prepare command for execution
+            if isinstance(command, str):
+                # Special handling for cRPD CLI commands
+                if namespace == "jcnr" and "crpd" in pod_name.lower() and command.startswith("cli "):
+                    # Use a shell to preserve the entire command as a single unit for cRPD
+                    cmd = ["sh", "-c", command]
+                else:
+                    cmd = command.split()
+            else:
+                cmd = command
+            
+            # Execute command with timeout (note: kubernetes library doesn't directly support timeout)
+            try:
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"Command execution timed out after {timeout_seconds} seconds")
+                
+                # Set up timeout signal (Unix only)
+                try:
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(timeout_seconds)
+                except (AttributeError, OSError):
+                    # Windows or other systems that don't support SIGALRM
+                    pass
+                
+                resp = stream(
+                    k8s_client.connect_get_namespaced_pod_exec,
+                    pod_name,
+                    namespace,
+                    command=cmd,
+                    container=container,
+                    stderr=True,
+                    stdin=False,
+                    stdout=True,
+                    tty=False
+                )
+                
+                # Cancel timeout
+                try:
+                    signal.alarm(0)
+                except (AttributeError, OSError):
+                    pass
+                
+                return {
+                    "pod": pod_name,
+                    "namespace": namespace,
+                    "container": container,
+                    "command": command,
+                    "cluster": cluster_name or "default",
+                    "output": resp,
+                    "status": "success"
+                }
+                
+            except TimeoutError as e:
+                return {
+                    "pod": pod_name,
+                    "namespace": namespace,
+                    "container": container,
+                    "command": command,
+                    "cluster": cluster_name or "default",
+                    "output": f"Command timed out after {timeout_seconds} seconds",
+                    "status": "timeout"
+                }
+            except Exception as e:
+                return {
+                    "pod": pod_name,
+                    "namespace": namespace,
+                    "container": container,
+                    "command": command,
+                    "cluster": cluster_name or "default",
+                    "output": f"Command execution failed: {str(e)}",
+                    "status": "error"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error executing command in pod: {e}")
+            raise Exception(f"Failed to execute command: {str(e)}")
 
     def _analyze_pod_logs(self, pod, cluster: str, paths_to_search: List[str], pattern: str, max_lines: int, is_dpdk_pod: bool = False) -> Dict[str, Any]:
         """Helper method to analyze logs within a specific pod, with enhanced JCNR support for DPDK pods."""
@@ -2161,6 +2343,15 @@ class EnhancedMCPServer:
                         output_lines.append(f"Cluster: {result['cluster']}")
                         output_lines.append(f"Command Source: {result.get('command_source', 'unknown')}")
                         
+                        # Show execution options
+                        if result.get('execution_options'):
+                            exec_opts = result['execution_options']
+                            output_lines.append(f"Execution Options:")
+                            output_lines.append(f"  Timeout: {exec_opts.get('timeout_seconds', 30)}s")
+                            output_lines.append(f"  Max Output Size: {exec_opts.get('max_output_size', 1048576)} bytes")
+                            output_lines.append(f"  Retry Count: {exec_opts.get('retry_count', 1)}")
+                            output_lines.append(f"  Continue on Error: {exec_opts.get('continue_on_error', True)}")
+                        
                         # Show commands to be executed
                         if result.get('commands_to_execute'):
                             output_lines.append(f"Commands to Execute: {len(result['commands_to_execute'])}")
@@ -2193,13 +2384,22 @@ class EnhancedMCPServer:
                             status = cmd_result.get("status", "unknown")
                             output_size = cmd_result.get("output_size_bytes", 0)
                             output_lines_count = cmd_result.get("output_lines", 0)
+                            execution_time = cmd_result.get("execution_time", 0)
+                            retry_attempts = cmd_result.get("retry_attempts", 0)
                             
                             # Status indicator
-                            status_icon = "✓" if status == "success" else "✗"
+                            status_icon = "✓" if status == "success" else ("⏱" if status == "timeout" else "✗")
                             
                             output_lines.append(f"\n{status_icon} Command {cmd_num}: {command}")
                             output_lines.append(f"   Status: {status}")
                             output_lines.append(f"   Output: {output_lines_count} lines, {output_size} bytes")
+                            output_lines.append(f"   Execution Time: {execution_time}s")
+                            if retry_attempts > 0:
+                                output_lines.append(f"   Retry Attempts: {retry_attempts}")
+                            
+                            # Show truncation warning
+                            if cmd_result.get("output_truncated"):
+                                output_lines.append(f"   ⚠️  Output truncated due to size limit")
                             
                             # Show error if present
                             if cmd_result.get("error"):
@@ -2208,11 +2408,11 @@ class EnhancedMCPServer:
                             # Show output preview
                             preview = cmd_result.get("output_preview", {})
                             if preview.get("content"):
-                                if preview.get("total_lines", 0) <= 3:
-                                    output_lines.append(f"   Output: {preview['content']}")
-                                else:
-                                    output_lines.append(f"   First line: {preview.get('first_line', 'N/A')}")
-                                    output_lines.append(f"   Last line: {preview.get('last_line', 'N/A')}")
+                                output_lines.append(f"   Output: {preview['content']}")
+                            elif preview.get("first_line") and preview.get("last_line"):
+                                output_lines.append(f"   First line: {preview.get('first_line', 'N/A')}")
+                                output_lines.append(f"   Last line: {preview.get('last_line', 'N/A')}")
+                                if preview.get("total_lines"):
                                     output_lines.append(f"   ({preview.get('total_lines', 0)} total lines)")
                             
                             # Show if output was truncated
