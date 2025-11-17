@@ -57,6 +57,390 @@ try:
 except ImportError:
     pass
 
+# Context Manager class (embedded to avoid module import issues)
+class ContextManager:
+    """Manages context gathering for LLM analysis."""
+    
+    def __init__(self, max_history: int = 100, max_context_size: int = 10*1024*1024):
+        """Initialize the context manager.
+        
+        Args:
+            max_history: Maximum number of commands to keep in history per session
+            max_context_size: Maximum size of accumulated context in bytes
+        """
+        self.max_history = max_history
+        self.max_context_size = max_context_size
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.active_sessions: set = set()
+        
+    def start_context_session(self, session_id: str, description: str = "") -> Dict[str, Any]:
+        """Start a new context gathering session.
+        
+        Args:
+            session_id: Unique identifier for the session
+            description: Optional description of what this session is for
+            
+        Returns:
+            Dictionary with session start result
+        """
+        if session_id in self.active_sessions:
+            return {"error": f"Context session '{session_id}' is already active"}
+        
+        self.sessions[session_id] = {
+            "id": session_id,
+            "description": description,
+            "started_at": time.time(),
+            "status": "active",
+            "commands": [],
+            "accumulated_context": "",
+            "total_commands": 0,
+            "total_output_size": 0,
+            "last_updated": time.time()
+        }
+        self.active_sessions.add(session_id)
+        
+        logger.info(f"Started context gathering session: {session_id}")
+        return {
+            "session_id": session_id,
+            "status": "started",
+            "message": f"Context gathering started for session '{session_id}'"
+        }
+    
+    def stop_context_session(self, session_id: str) -> Dict[str, Any]:
+        """Stop context gathering and return accumulated data.
+        
+        Args:
+            session_id: Session ID to stop
+            
+        Returns:
+            Dictionary with session stop result and accumulated context
+        """
+        if session_id not in self.active_sessions:
+            return {"error": f"No active context session '{session_id}' found"}
+        
+        session = self.sessions[session_id]
+        session["status"] = "stopped"
+        session["stopped_at"] = time.time()
+        self.active_sessions.remove(session_id)
+        
+        # Prepare final context for LLM
+        context_summary = self._prepare_llm_context(session)
+        
+        logger.info(f"Stopped context gathering session: {session_id} ({session['total_commands']} commands)")
+        return {
+            "session_id": session_id,
+            "status": "stopped",
+            "commands_executed": session["total_commands"],
+            "total_output_size": session["total_output_size"],
+            "context_for_llm": context_summary,
+            "session_duration": self._calculate_duration(session)
+        }
+    
+    def add_command_output(self, command_info: Dict[str, Any]) -> None:
+        """Add command output to all active context sessions.
+        
+        Args:
+            command_info: Dictionary containing command execution details
+        """
+        if not self.active_sessions:
+            return  # No active sessions to add to
+            
+        for session_id in self.active_sessions:
+            self._add_command_to_session_internal(session_id, command_info)
+    
+    def add_command_to_session(self, session_id: str, command_info: Dict[str, Any]) -> bool:
+        """Add command output to a specific context session.
+        
+        Args:
+            session_id: Session ID to add command to
+            command_info: Dictionary containing command execution details
+            
+        Returns:
+            True if added successfully, False otherwise
+        """
+        if session_id not in self.sessions:
+            logger.warning(f"Session '{session_id}' not found")
+            return False
+            
+        if session_id not in self.active_sessions:
+            logger.warning(f"Session '{session_id}' is not active")
+            return False
+            
+        self._add_command_to_session_internal(session_id, command_info)
+        return True
+    
+    def _add_command_to_session_internal(self, session_id: str, command_info: Dict[str, Any]) -> None:
+        """Internal method to add command to a specific session.
+        
+        Args:
+            session_id: Session ID to add command to
+            command_info: Dictionary containing command execution details
+        """
+        session = self.sessions[session_id]
+        current_time = time.time()
+        
+        # Add to command history
+        command_entry = {
+            "timestamp": current_time,
+            "cluster": command_info.get("cluster", "unknown"),
+            "pod": command_info.get("pod", "unknown"),
+            "namespace": command_info.get("namespace", "unknown"),
+            "command": command_info.get("command", "unknown"),
+            "output": command_info.get("output", ""),
+            "status": command_info.get("status", "unknown"),
+            "execution_time": command_info.get("execution_time", 0),
+            "tool_used": command_info.get("tool_used", "unknown")
+        }
+        
+        session["commands"].append(command_entry)
+        
+        # Accumulate context for LLM
+        context_entry = self._format_context_entry(command_info)
+        session["accumulated_context"] += context_entry
+        session["total_commands"] += 1
+        session["total_output_size"] += len(command_info.get("output", ""))
+        session["last_updated"] = current_time
+        
+        # Trim if too large
+        if len(session["accumulated_context"]) > self.max_context_size:
+            session["accumulated_context"] = self._trim_context(session["accumulated_context"])
+            session["context_trimmed"] = True
+        
+        # Limit command history
+        if len(session["commands"]) > self.max_history:
+            session["commands"] = session["commands"][-self.max_history:]
+            session["history_trimmed"] = True
+            
+        logger.debug(f"Added command output to session {session_id}: {command_info.get('command', 'unknown')}")
+    
+    def _format_context_entry(self, command_info: Dict[str, Any]) -> str:
+        """Format command info for LLM context.
+        
+        Args:
+            command_info: Command execution details
+            
+        Returns:
+            Formatted context entry string
+        """
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        cluster = command_info.get("cluster", "unknown")
+        pod = command_info.get("pod", "unknown")
+        namespace = command_info.get("namespace", "unknown")
+        command = command_info.get("command", "unknown")
+        output = command_info.get("output", "")
+        status = command_info.get("status", "unknown")
+        tool_used = command_info.get("tool_used", "unknown")
+        execution_time = command_info.get("execution_time", 0)
+        
+        # Truncate very long outputs for context
+        if len(output) > 2000:
+            output = output[:2000] + "\n... [OUTPUT TRUNCATED FOR CONTEXT] ..."
+        
+        return f"""
+[{timestamp}] COMMAND EXECUTED
+Tool: {tool_used}
+Cluster: {cluster}
+Pod: {pod} (namespace: {namespace})
+Command: {command}
+Status: {status}
+Execution Time: {execution_time:.2f}s
+Output:
+{output}
+{'='*80}
+
+"""
+    
+    def _trim_context(self, context: str) -> str:
+        """Trim context to stay under size limit.
+        
+        Args:
+            context: Context string to trim
+            
+        Returns:
+            Trimmed context string
+        """
+        lines = context.split('\n')
+        if len(lines) > 200:
+            # Keep first 100 and last 100 lines
+            trimmed = (lines[:100] + 
+                      ["\n... [MIDDLE SECTION TRIMMED FOR SIZE] ...\n"] + 
+                      lines[-100:])
+            return '\n'.join(trimmed)
+        return context
+    
+    def _prepare_llm_context(self, session: Dict[str, Any]) -> str:
+        """Prepare accumulated context for LLM analysis.
+        
+        Args:
+            session: Session dictionary
+            
+        Returns:
+            Formatted context string for LLM
+        """
+        import datetime
+        duration = self._calculate_duration(session)
+        
+        started_dt = datetime.datetime.fromtimestamp(session['started_at'])
+        stopped_dt = datetime.datetime.fromtimestamp(session.get('stopped_at', time.time()))
+        
+        header = f"""
+KUBERNETES COMMAND EXECUTION CONTEXT
+=====================================
+Session ID: {session['id']}
+Description: {session.get('description', 'No description')}
+Started: {started_dt.strftime('%Y-%m-%d %H:%M:%S')}
+Stopped: {stopped_dt.strftime('%Y-%m-%d %H:%M:%S') if session.get('stopped_at') else 'Active'}
+Duration: {duration}
+Commands Executed: {session['total_commands']}
+Total Output Size: {session['total_output_size']:,} bytes
+Context Trimmed: {session.get('context_trimmed', False)}
+History Trimmed: {session.get('history_trimmed', False)}
+
+COMMAND EXECUTION SUMMARY:
+{'='*80}
+"""
+        
+        # Add command summary
+        summary_lines = []
+        for i, cmd in enumerate(session['commands'], 1):
+            status_icon = "✅" if cmd['status'] == "success" else "❌"
+            cmd_time = datetime.datetime.fromtimestamp(cmd['timestamp'])
+            summary_lines.append(
+                f"{i:3d}. {status_icon} [{cmd_time.strftime('%H:%M:%S')}] "
+                f"{cmd['tool_used']}: {cmd['command'][:50]}... "
+                f"({cmd['status']}, {cmd['execution_time']:.2f}s)"
+            )
+        
+        summary = '\n'.join(summary_lines)
+        
+        footer = f"""
+{'='*80}
+DETAILED COMMAND OUTPUTS:
+{'='*80}
+{session['accumulated_context']}
+
+{'='*80}
+END OF CONTEXT SESSION: {session['id']}
+
+ANALYSIS INSTRUCTIONS:
+This context contains a complete sequence of Kubernetes/JCNR commands 
+and their outputs for analysis. Use this information to:
+
+- Identify patterns and relationships between commands
+- Troubleshoot issues across multiple components
+- Correlate data from different pods/clusters  
+- Provide comprehensive analysis and recommendations
+- Suggest next diagnostic steps based on the accumulated evidence
+
+The commands were executed in chronological order and represent a 
+complete troubleshooting or analysis session.
+"""
+        
+        return header + summary + footer
+    
+    def _calculate_duration(self, session: Dict[str, Any]) -> str:
+        """Calculate session duration.
+        
+        Args:
+            session: Session dictionary
+            
+        Returns:
+            Human-readable duration string
+        """
+        try:
+            started = session['started_at']
+            ended = session.get('stopped_at', time.time())
+            duration_seconds = int(ended - started)
+            
+            hours, remainder = divmod(duration_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            if hours > 0:
+                return f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                return f"{minutes}m {seconds}s"
+            else:
+                return f"{seconds}s"
+        except Exception:
+            return "unknown"
+    
+    def get_active_sessions(self) -> List[str]:
+        """Get list of active context session IDs.
+        
+        Returns:
+            List of active session IDs
+        """
+        return list(self.active_sessions)
+    
+    def get_session_info(self, session_id: str) -> Dict[str, Any]:
+        """Get information about a specific session.
+        
+        Args:
+            session_id: Session ID to get info for
+            
+        Returns:
+            Session information dictionary
+        """
+        if session_id not in self.sessions:
+            return {"error": f"Session '{session_id}' not found"}
+        
+        session = self.sessions[session_id]
+        import datetime
+        
+        started_dt = datetime.datetime.fromtimestamp(session['started_at'])
+        stopped_dt = None
+        if session.get('stopped_at'):
+            stopped_dt = datetime.datetime.fromtimestamp(session['stopped_at'])
+        
+        return {
+            "session_id": session["id"],
+            "description": session.get("description", ""),
+            "status": session["status"],
+            "started_at": started_dt.isoformat(),
+            "stopped_at": stopped_dt.isoformat() if stopped_dt else None,
+            "last_updated": datetime.datetime.fromtimestamp(session.get('last_updated', time.time())).isoformat(),
+            "commands_executed": session["total_commands"],
+            "output_size": session["total_output_size"],
+            "is_active": session_id in self.active_sessions,
+            "duration": self._calculate_duration(session),
+            "context_trimmed": session.get("context_trimmed", False),
+            "history_trimmed": session.get("history_trimmed", False)
+        }
+    
+    def get_all_sessions_info(self) -> List[Dict[str, Any]]:
+        """Get information about all sessions.
+        
+        Returns:
+            List of session information dictionaries
+        """
+        return [self.get_session_info(session_id) for session_id in self.sessions.keys()]
+    
+    def get_context_for_llm(self, session_id: str) -> Dict[str, Any]:
+        """Get formatted context data for LLM analysis.
+        
+        Args:
+            session_id: Session ID to get context for
+            
+        Returns:
+            Dictionary with context data and metadata
+        """
+        if session_id not in self.sessions:
+            return {"error": f"Session '{session_id}' not found"}
+        
+        session = self.sessions[session_id]
+        context_for_llm = self._prepare_llm_context(session)
+        
+        import datetime
+        return {
+            "session_id": session_id,
+            "context_for_llm": context_for_llm,
+            "generated_at": datetime.datetime.now().isoformat(),
+            "commands_count": session["total_commands"],
+            "total_size_bytes": session["total_output_size"],
+            "session_status": session["status"]
+        }
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -566,6 +950,149 @@ class KubernetesManager:
         
         return results
     
+    def execute_agent_http_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
+        """Execute an HTTP command in all DPDK pods (vrdpdk) in contrail namespace.
+        Uses both direct HTTP requests and curl fallback for better reliability.
+        """
+        results = []
+        clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
+        
+        for cluster in clusters_to_check:
+            try:
+                # Get pods in contrail namespace
+                pods = self.list_pods("contrail", cluster)
+                dpdk_pods = [pod for pod in pods if "vrdpdk" in pod["name"]]
+                
+                for pod in dpdk_pods:
+                    try:
+                        # Parse the HTTP command to extract the endpoint
+                        # Expected formats: "GET /endpoint" or just "/endpoint"
+                        if command.startswith("GET "):
+                            endpoint = command[4:].strip()
+                        elif command.startswith("/"):
+                            endpoint = command.strip()
+                        else:
+                            # Assume it's an endpoint without leading slash
+                            endpoint = f"/{command.strip()}"
+                        
+                        # Get pod info for HTTP requests
+                        try:
+                            k8s_client = self.get_k8s_client(cluster)
+                            pod_info = k8s_client.read_namespaced_pod(name=pod["name"], namespace="contrail")
+                            pod_ip = pod_info.status.pod_ip
+                        except Exception as pod_e:
+                            results.append({
+                                "pod": pod["name"],
+                                "namespace": "contrail",
+                                "command": command,
+                                "cluster": cluster,
+                                "pod_type": "DPDK",
+                                "output": f"Failed to get pod info: {str(pod_e)}",
+                                "status": "error",
+                                "method": "unknown"
+                            })
+                            continue
+                        
+                        if not pod_ip:
+                            results.append({
+                                "pod": pod["name"],
+                                "namespace": "contrail",
+                                "command": command,
+                                "cluster": cluster,
+                                "pod_type": "DPDK",
+                                "output": "Pod IP not available",
+                                "status": "error",
+                                "method": "unknown"
+                            })
+                            continue
+                        
+                        # Default HTTP port for Sandesh
+                        http_port = 8085
+                        
+                        # Try direct HTTP access first
+                        success = False
+                        method_used = "unknown"
+                        output_data = ""
+                        
+                        if HTTP_AVAILABLE:
+                            try:
+                                url = f"http://{pod_ip}:{http_port}{endpoint}"
+                                response = requests.get(url, timeout=10, headers={'Connection': 'close'})
+                                
+                                if response.status_code == 200:
+                                    output_data = response.text
+                                    method_used = "direct_http"
+                                    success = True
+                                else:
+                                    raise Exception(f"HTTP {response.status_code}: {response.text[:100]}")
+                                    
+                            except Exception as http_e:
+                                # Fallback to curl method via kubectl exec
+                                try:
+                                    curl_url = f"http://localhost:{http_port}{endpoint}"
+                                    curl_cmd = f"curl -s --connect-timeout 5 --max-time 10 '{curl_url}' 2>/dev/null"
+                                    
+                                    curl_result = self.execute_pod_command(
+                                        pod["name"], "contrail", curl_cmd, None, cluster
+                                    )
+                                    
+                                    if curl_result.get("status") == "success":
+                                        curl_output = curl_result.get("output", "")
+                                        # Check if curl output looks like valid data
+                                        if curl_output and len(curl_output.strip()) > 10 and not curl_output.startswith("curl:"):
+                                            output_data = curl_output
+                                            method_used = "curl_exec"
+                                            success = True
+                                        else:
+                                            output_data = f"Direct HTTP failed: {str(http_e)}. Curl failed: invalid/empty response"
+                                    else:
+                                        output_data = f"Direct HTTP failed: {str(http_e)}. Curl execution failed: {curl_result.get('output', 'Unknown error')}"
+                                        
+                                except Exception as curl_e:
+                                    output_data = f"Direct HTTP failed: {str(http_e)}. Curl fallback failed: {str(curl_e)}"
+                        else:
+                            output_data = "HTTP requests library not available"
+                        
+                        result = {
+                            "pod": pod["name"],
+                            "namespace": "contrail",
+                            "command": command,
+                            "cluster": cluster,
+                            "pod_type": "DPDK",
+                            "output": output_data,
+                            "status": "success" if success else "error",
+                            "method": method_used,
+                            "endpoint": endpoint,
+                            "pod_ip": pod_ip,
+                            "http_port": http_port
+                        }
+                        results.append(result)
+                        
+                    except Exception as e:
+                        results.append({
+                            "pod": pod["name"],
+                            "namespace": "contrail",
+                            "command": command,
+                            "cluster": cluster,
+                            "pod_type": "DPDK",
+                            "output": f"Failed to execute HTTP command: {str(e)}",
+                            "status": "error",
+                            "method": "unknown"
+                        })
+                        
+            except Exception as e:
+                results.append({
+                    "cluster": cluster,
+                    "namespace": "contrail",
+                    "command": command,
+                    "pod_type": "DPDK",
+                    "output": f"Failed to access cluster: {str(e)}",
+                    "status": "error",
+                    "method": "unknown"
+                })
+        
+        return results
+    
     def execute_junos_cli_commands(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
         """Execute a command in all cRPD and cSRX pods in jcnr namespace.
         Automatically prepends 'cli -c' to commands for proper Junos CLI execution."""
@@ -621,8 +1148,6 @@ class KubernetesManager:
                     "output": f"Failed to access cluster: {str(e)}",
                     "status": "error"
                 })
-        
-        return results
         
         return results
     
@@ -1694,6 +2219,9 @@ class EnhancedMCPServer:
         # Initialize Kubernetes manager
         self.k8s_manager = KubernetesManager(clusters_config_path)
         
+        # Initialize context manager
+        self.context_manager = ContextManager()
+        
         # Initialize the MCP server
         server_name = f"enhanced-mcp-{transport}-server"
         self.mcp_server = Server(server_name)
@@ -1711,6 +2239,19 @@ class EnhancedMCPServer:
             self._setup_http_components()
         # stdio setup will be handled in the start method
     
+    def _add_command_to_context(self, command_info: Dict[str, Any]) -> None:
+        """Add command execution information to any active context sessions."""
+        try:
+            # Check if there are any active context sessions
+            active_sessions = self.context_manager.get_active_sessions()
+            if active_sessions:
+                # Add this command to all active sessions
+                for session_id in active_sessions:
+                    self.context_manager.add_command_to_session(session_id, command_info)
+                logger.debug(f"Added command to {len(active_sessions)} active context sessions")
+        except Exception as e:
+            logger.warning(f"Failed to add command to context: {e}")
+
     def _setup_http_components(self):
         """Set up HTTP-specific components (FastAPI app, routes, etc.)."""
         self.app = FastAPI(
@@ -1867,6 +2408,24 @@ class EnhancedMCPServer:
                         }
                     ),
                     types.Tool(
+                        name="execute_agent_http_command",
+                        description="Execute HTTP API commands in DPDK pods in contrail namespace. Uses direct HTTP requests with curl fallback for better reliability. Supports endpoints like '/Snh_NhListReq' or 'GET /Snh_VrfListReq'.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "HTTP command/endpoint to execute (e.g., '/Snh_NhListReq?type=', 'GET /Snh_VrfListReq', '/Snh_FetchFlowRecord?x=0')"
+                                },
+                                "cluster_name": {
+                                    "type": "string",
+                                    "description": "Name of the cluster (optional, executes on all clusters if not specified)"
+                                }
+                            },
+                            "required": ["command"]
+                        }
+                    ),
+                    types.Tool(
                         name="check_core_files",
                         description="Check for core files on nodes in a Kubernetes cluster. Searches common locations for core dumps",
                         inputSchema={
@@ -1967,6 +2526,85 @@ class EnhancedMCPServer:
                             },
                             "required": ["cluster_name"]
                         }
+                    ),
+                    types.Tool(
+                        name="start_context_gathering",
+                        description="Start collecting command outputs for LLM context analysis. All subsequent commands will accumulate outputs until stop_context_gathering is called.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "Unique identifier for this context session"
+                                },
+                                "description": {
+                                    "type": "string", 
+                                    "description": "Optional description of what this context session is for"
+                                }
+                            },
+                            "required": ["session_id"]
+                        }
+                    ),
+                    types.Tool(
+                        name="stop_context_gathering", 
+                        description="Stop collecting command outputs and return accumulated context for LLM analysis.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "Session ID to stop"
+                                }
+                            },
+                            "required": ["session_id"]
+                        }
+                    ),
+                    types.Tool(
+                        name="get_context_sessions",
+                        description="Get information about active and completed context gathering sessions.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "Optional specific session ID to get info for"
+                                },
+                                "show_all": {
+                                    "type": "boolean",
+                                    "description": "Show all sessions including stopped ones (default: false)"
+                                }
+                            },
+                            "required": []
+                        }
+                    ),
+                    types.Tool(
+                        name="analyze_context_with_llm",
+                        description="Find a stored context session by name and format it for LLM analysis. Returns the context data with analysis prompt ready for the MCP client's LLM.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "Name/ID of the context session to analyze"
+                                },
+                                "analysis_type": {
+                                    "type": "string",
+                                    "enum": ["troubleshooting", "summary", "recommendations", "root_cause", "custom"],
+                                    "description": "Type of analysis to request from the LLM",
+                                    "default": "troubleshooting"
+                                },
+                                "custom_prompt": {
+                                    "type": "string",
+                                    "description": "Custom prompt for LLM analysis (required if analysis_type is 'custom')"
+                                },
+                                "include_raw_context": {
+                                    "type": "boolean",
+                                    "description": "Include the raw context data separately for reference (default: false)",
+                                    "default": False
+                                }
+                            },
+                            "required": ["session_id"]
+                        }
                     )
                 ]
                 tools.extend(k8s_tools)
@@ -2020,19 +2658,48 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="Error: namespace parameter is required")]
                     
                     try:
+                        start_time = time.time()
                         pods = self.k8s_manager.list_pods(namespace, cluster_name)
+                        end_time = time.time()
                         
                         if not pods:
-                            return [types.TextContent(type="text", text=f"No pods found in namespace '{namespace}'")]
+                            result_text = f"No pods found in namespace '{namespace}'"
+                        else:
+                            result_text = f"Pods in namespace '{namespace}' (cluster: {cluster_name or 'default'}):\n"
+                            for pod in pods:
+                                result_text += f"- {pod['name']}\n"
+                                result_text += f"  Status: {pod['status']}, Ready: {pod['ready']}, Restarts: {pod['restarts']}\n"
+                                result_text += f"  Node: {pod['node']}, Created: {pod['created']}\n\n"
                         
-                        result = f"Pods in namespace '{namespace}' (cluster: {cluster_name or 'default'}):\n"
-                        for pod in pods:
-                            result += f"- {pod['name']}\n"
-                            result += f"  Status: {pod['status']}, Ready: {pod['ready']}, Restarts: {pod['restarts']}\n"
-                            result += f"  Node: {pod['node']}, Created: {pod['created']}\n\n"
+                        # Add to context if active sessions exist
+                        command_info = {
+                            "cluster": cluster_name or "default",
+                            "pod": "N/A",
+                            "namespace": namespace,
+                            "command": f"list_pods --namespace {namespace}" + (f" --cluster_name {cluster_name}" if cluster_name else ""),
+                            "output": result_text,
+                            "status": "success",
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "list_pods",
+                            "pods_found": len(pods)
+                        }
+                        self._add_command_to_context(command_info)
                         
-                        return [types.TextContent(type="text", text=result)]
+                        return [types.TextContent(type="text", text=result_text)]
                     except Exception as e:
+                        # Add error to context if active sessions exist
+                        command_info = {
+                            "cluster": cluster_name or "default",
+                            "pod": "N/A",
+                            "namespace": namespace,
+                            "command": f"list_pods --namespace {namespace}" + (f" --cluster_name {cluster_name}" if cluster_name else ""),
+                            "output": f"Error listing pods: {str(e)}",
+                            "status": "error",
+                            "execution_time": 0,
+                            "tool_used": "list_pods"
+                        }
+                        self._add_command_to_context(command_info)
+                        
                         return [types.TextContent(type="text", text=f"Error listing pods: {str(e)}")]
                 
                 elif name == "execute_command":
@@ -2049,7 +2716,23 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="Error: pod_name, namespace, and command parameters are required")]
                     
                     try:
+                        start_time = time.time()
                         response = self.k8s_manager.execute_pod_command(pod_name, namespace, command, container, cluster_name)
+                        end_time = time.time()
+                        
+                        # Add to context if active sessions exist
+                        command_info = {
+                            "cluster": cluster_name or "default",
+                            "pod": pod_name,
+                            "namespace": namespace,
+                            "container": container or "default",
+                            "command": command,
+                            "output": response.get("output", ""),
+                            "status": response.get("status", "unknown"),
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "execute_command"
+                        }
+                        self._add_command_to_context(command_info)
                         
                         output = response.get("output", "")
                         if response.get("status") == "success":
@@ -2070,7 +2753,24 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="Error: command parameter is required")]
                     
                     try:
+                        start_time = time.time()
                         results = self.k8s_manager.execute_dpdk_command(command, cluster_name)
+                        end_time = time.time()
+                        
+                        # Add to context if active sessions exist
+                        for result in results:
+                            command_info = {
+                                "cluster": result.get("cluster", "unknown"),
+                                "pod": result.get("pod", "unknown"),
+                                "namespace": "contrail",
+                                "pod_type": "DPDK",
+                                "command": command,
+                                "output": result.get("output", ""),
+                                "status": result.get("status", "unknown"),
+                                "execution_time": round(end_time - start_time, 3),
+                                "tool_used": "execute_dpdk_command"
+                            }
+                            self._add_command_to_context(command_info)
                         
                         if not results:
                             return [types.TextContent(type="text", text="No DPDK pods found in contrail namespace")]
@@ -2105,7 +2805,24 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="Error: command parameter is required")]
                     
                     try:
+                        start_time = time.time()
                         results = self.k8s_manager.execute_agent_command(command, cluster_name)
+                        end_time = time.time()
+                        
+                        # Add to context if active sessions exist
+                        for result in results:
+                            command_info = {
+                                "cluster": result.get("cluster", "unknown"),
+                                "pod": result.get("pod", "unknown"),
+                                "namespace": "contrail",
+                                "pod_type": "Agent",
+                                "command": command,
+                                "output": result.get("output", ""),
+                                "status": result.get("status", "unknown"),
+                                "execution_time": round(end_time - start_time, 3),
+                                "tool_used": "execute_agent_command"
+                            }
+                            self._add_command_to_context(command_info)
                         
                         if not results:
                             return [types.TextContent(type="text", text="No Agent pods found in contrail namespace")]
@@ -2140,7 +2857,24 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="Error: command parameter is required")]
                     
                     try:
+                        start_time = time.time()
                         results = self.k8s_manager.execute_junos_cli_commands(command, cluster_name)
+                        end_time = time.time()
+                        
+                        # Add to context if active sessions exist
+                        for result in results:
+                            command_info = {
+                                "cluster": result.get("cluster", "unknown"),
+                                "pod": result.get("pod", "unknown"),
+                                "namespace": "jcnr",
+                                "pod_type": result.get("pod_type", "Junos"),
+                                "command": command,
+                                "output": result.get("output", ""),
+                                "status": result.get("status", "unknown"),
+                                "execution_time": round(end_time - start_time, 3),
+                                "tool_used": "execute_junos_cli_commands"
+                            }
+                            self._add_command_to_context(command_info)
                         
                         if not results:
                             return [types.TextContent(type="text", text="No cRPD or cSRX pods found in jcnr namespace")]
@@ -2163,6 +2897,66 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="\n".join(output_lines))]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error executing cRPD command: {str(e)}")]
+                
+                elif name == "execute_agent_http_command":
+                    if not KUBERNETES_AVAILABLE:
+                        return [types.TextContent(type="text", text="Error: Kubernetes library not available")]
+                    
+                    command = arguments.get("command")
+                    cluster_name = arguments.get("cluster_name")
+                    
+                    if not command:
+                        return [types.TextContent(type="text", text="Error: command parameter is required")]
+                    
+                    try:
+                        start_time = time.time()
+                        results = self.k8s_manager.execute_agent_http_command(command, cluster_name)
+                        end_time = time.time()
+                        
+                        # Add to context if active sessions exist
+                        for result in results:
+                            command_info = {
+                                "cluster": result.get("cluster", "unknown"),
+                                "pod": result.get("pod", "unknown"),
+                                "namespace": "contrail",
+                                "pod_type": "DPDK",
+                                "command": command,
+                                "output": result.get("output", ""),
+                                "status": result.get("status", "unknown"),
+                                "execution_time": round(end_time - start_time, 3),
+                                "tool_used": "execute_agent_http_command",
+                                "method": result.get("method", "unknown"),
+                                "endpoint": result.get("endpoint", ""),
+                                "pod_ip": result.get("pod_ip", ""),
+                                "http_port": result.get("http_port", 8085)
+                            }
+                            self._add_command_to_context(command_info)
+                        
+                        if not results:
+                            return [types.TextContent(type="text", text="No DPDK pods found in contrail namespace")]
+                        
+                        output_lines = [f"HTTP Command Execution Results for: {command}"]
+                        output_lines.append("=" * 60)
+                        
+                        for result in results:
+                            cluster = result.get("cluster", "unknown")
+                            pod = result.get("pod", "unknown")
+                            status = result.get("status", "unknown")
+                            method = result.get("method", "unknown")
+                            endpoint = result.get("endpoint", "")
+                            pod_output = result.get("output", "")
+                            
+                            output_lines.append(f"\nCluster: {cluster}")
+                            output_lines.append(f"Pod: {pod}")
+                            output_lines.append(f"Endpoint: {endpoint}")
+                            output_lines.append(f"Method: {method}")
+                            output_lines.append(f"Status: {status}")
+                            output_lines.append(f"Output:\n{pod_output}")
+                            output_lines.append("-" * 40)
+                        
+                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error executing HTTP command: {str(e)}")]
                 
                 elif name == "check_core_files":
                     if not KUBERNETES_AVAILABLE:
@@ -2329,10 +3123,13 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text="Error: cluster_name is required - this tool requires a cluster with pod_command_list configuration")]
                     
                     try:
+                        start_time = time.time()
                         result = self.k8s_manager.pod_command_and_summary(
                             pod_name, namespace, container, cluster_name
                         )
+                        end_time = time.time()
                         
+                        # Prepare summary text for output
                         output_lines = ["Command Execution Summary"]
                         output_lines.append("=" * 50)
                         
@@ -2361,6 +3158,23 @@ class EnhancedMCPServer:
                         # Check for errors
                         if result.get("error"):
                             output_lines.append(f"Error: {result['error']}")
+                            
+                            # Add error to context if active sessions exist
+                            command_info = {
+                                "cluster": cluster_name or "default",
+                                "pod": pod_name,
+                                "namespace": namespace,
+                                "container": container or "default",
+                                "command": f"pod_command_and_summary (cluster: {cluster_name})",
+                                "output": f"Error: {result['error']}",
+                                "status": "error",
+                                "execution_time": round(end_time - start_time, 3),
+                                "tool_used": "pod_command_and_summary",
+                                "commands_planned": len(result.get('commands_to_execute', [])),
+                                "command_source": result.get('command_source', 'unknown')
+                            }
+                            self._add_command_to_context(command_info)
+                            
                             return [types.TextContent(type="text", text="\n".join(output_lines))]
                         
                         # Execution summary
@@ -2424,7 +3238,28 @@ class EnhancedMCPServer:
                         output_lines.append("=" * 50)
                         output_lines.append("Use individual execute_command calls for full command outputs")
                         
-                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                        # Add successful execution summary to context if active sessions exist
+                        summary_text = "\n".join(output_lines)
+                        command_info = {
+                            "cluster": cluster_name or "default",
+                            "pod": pod_name,
+                            "namespace": namespace,
+                            "container": container or "default",
+                            "command": f"pod_command_and_summary (cluster: {cluster_name})",
+                            "output": summary_text,
+                            "status": "success",
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "pod_command_and_summary",
+                            "commands_executed": result.get('commands_executed', 0),
+                            "commands_successful": result.get('commands_successful', 0),
+                            "commands_failed": result.get('commands_failed', 0),
+                            "success_rate": result.get('success_rate', '0%'),
+                            "total_output_size_bytes": result.get('total_output_size_bytes', 0),
+                            "command_source": result.get('command_source', 'unknown')
+                        }
+                        self._add_command_to_context(command_info)
+                        
+                        return [types.TextContent(type="text", text=summary_text)]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error running commands: {str(e)}")]
                 
@@ -2446,6 +3281,7 @@ class EnhancedMCPServer:
                         return [types.TextContent(type="text", text=f"Error loading JCNR configuration: {str(e)}")]
                     
                     try:
+                        start_time = time.time()
                         # Get all DPDK pods in contrail namespace
                         results = []
                         clusters_to_check = [cluster_name] if cluster_name else list(self.k8s_manager.clusters_config.keys())
@@ -2592,6 +3428,8 @@ class EnhancedMCPServer:
                         if not results:
                             return [types.TextContent(type="text", text="No DPDK pods found in contrail namespace across any clusters")]
                         
+                        end_time = time.time()
+                        
                         # Format the output with enhanced analysis
                         output_lines = [f"JCNR Datapath Summary with Route/Next-hop/Flow Analysis + HTTP API + Junos CLI"]
                         output_lines.append("=" * 80)
@@ -2704,26 +3542,73 @@ class EnhancedMCPServer:
                                     if pod_ip:
                                         output_lines.append(f"🌐 Fetching HTTP API data from pod IP: {pod_ip}:{http_port}")
                                         
+                                        # Try direct HTTP access first, then fallback to curl if needed
+                                        direct_success_count = 0
+                                        
                                         # Use configurable HTTP API endpoints
                                         for endpoint_name, endpoint_config in http_endpoints.items():
+                                            endpoint_uri = endpoint_config.get("uri", endpoint_config) if isinstance(endpoint_config, dict) else endpoint_config
+                                            
+                                            # Try direct HTTP access first
                                             try:
-                                                endpoint_uri = endpoint_config.get("uri", endpoint_config) if isinstance(endpoint_config, dict) else endpoint_config
                                                 url = f"http://{pod_ip}:{http_port}/{endpoint_uri}"
                                                 output_lines.append(f"Debug: Requesting {url}")
                                                 
-                                                response = requests.get(url, timeout=10)
+                                                response = requests.get(url, timeout=10, headers={'Connection': 'close'})
                                                 if response.status_code == 200:
-                                                    # Store both endpoint name and URI for flexible access
                                                     http_outputs[endpoint_name] = {
                                                         "data": response.text,
-                                                        "uri": endpoint_uri
+                                                        "uri": endpoint_uri,
+                                                        "method": "direct_http"
                                                     }
-                                                    output_lines.append(f"Debug: Got {len(response.text)} chars from {endpoint_name}")
+                                                    output_lines.append(f"Debug: Direct HTTP success for {endpoint_name}, got {len(response.text)} chars")
+                                                    direct_success_count += 1
                                                 else:
                                                     output_lines.append(f"Debug: HTTP {response.status_code} for {endpoint_name}")
+                                                    raise Exception(f"HTTP {response.status_code}")
                                                     
                                             except Exception as http_e:
-                                                output_lines.append(f"Debug: Error fetching {endpoint_name}: {str(http_e)}")
+                                                output_lines.append(f"Debug: Direct HTTP failed for {endpoint_name}: {str(http_e)}")
+                                                
+                                                # Fallback to curl method via kubectl exec
+                                                try:
+                                                    output_lines.append(f"Debug: Trying curl fallback for {endpoint_name}")
+                                                    curl_url = f"http://localhost:{http_port}/{endpoint_uri}"
+                                                    
+                                                    # Use curl inside the pod to access the HTTP API
+                                                    curl_cmd = f"curl -s --max-time 10 --connect-timeout 5 '{curl_url}' 2>/dev/null"
+                                                    
+                                                    curl_result = self.k8s_manager.execute_pod_command(
+                                                        pod, "contrail", curl_cmd, None, cluster
+                                                    )
+                                                    
+                                                    if curl_result.get("status") == "success":
+                                                        curl_output = curl_result.get("output", "")
+                                                        # Check if curl output looks like valid XML/data
+                                                        if curl_output and len(curl_output.strip()) > 20 and not curl_output.startswith("curl:"):
+                                                            http_outputs[endpoint_name] = {
+                                                                "data": curl_output,
+                                                                "uri": endpoint_uri,
+                                                                "method": "curl_exec"
+                                                            }
+                                                            output_lines.append(f"Debug: Curl fallback succeeded for {endpoint_name}, got {len(curl_output)} chars")
+                                                        else:
+                                                            output_lines.append(f"Debug: Curl fallback failed for {endpoint_name}: invalid/empty response")
+                                                    else:
+                                                        output_lines.append(f"Debug: Curl execution failed for {endpoint_name}: {curl_result.get('output', 'Unknown error')}")
+                                                        
+                                                except Exception as curl_e:
+                                                    output_lines.append(f"Debug: Curl fallback exception for {endpoint_name}: {str(curl_e)}")
+                                        
+                                        # Summary of HTTP API access attempts
+                                        total_endpoints = len(http_endpoints)
+                                        success_endpoints = len(http_outputs)
+                                        output_lines.append(f"Debug: HTTP API Summary - {success_endpoints}/{total_endpoints} endpoints successful")
+                                        output_lines.append(f"Debug: Direct HTTP: {direct_success_count}, Curl fallback: {success_endpoints - direct_success_count}")
+                                        
+                                        if success_endpoints == 0:
+                                            output_lines.append("Debug: All HTTP API endpoints failed. Pod HTTP server may not be running or accessible.")
+                                            
                                     else:
                                         output_lines.append("Debug: Pod IP not available for HTTP requests")
                                         
@@ -2847,10 +3732,273 @@ class EnhancedMCPServer:
                             
                             output_lines.append("-" * 80)
                         
-                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                        # Prepare final summary text
+                        summary_text = "\n".join(output_lines)
+                        
+                        # Count successful vs failed operations for context
+                        successful_operations = 0
+                        failed_operations = 0
+                        total_pods_processed = 0
+                        total_commands_executed = 0
+                        
+                        for result in results:
+                            if result.get("error") or result.get("warning"):
+                                failed_operations += 1
+                            else:
+                                successful_operations += 1
+                                total_pods_processed += 1
+                                
+                                # Count commands executed in this pod
+                                if result.get("pod_type") == "DPDK":
+                                    commands_exec = result.get("commands_executed", [])
+                                    total_commands_executed += len(commands_exec)
+                                elif result.get("pod_type") == "cRPD":
+                                    junos_commands_exec = result.get("junos_commands_executed", [])
+                                    total_commands_executed += len(junos_commands_exec)
+                        
+                        # Add comprehensive context tracking for successful execution
+                        command_info = {
+                            "cluster": cluster_name or "multiple",
+                            "pod": f"{total_pods_processed} pods processed",
+                            "namespace": "contrail,jcnr",
+                            "command": f"jcnr_summary (cluster: {cluster_name})",
+                            "output": summary_text,
+                            "status": "success" if failed_operations == 0 else "partial_success",
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "jcnr_summary",
+                            "successful_operations": successful_operations,
+                            "failed_operations": failed_operations,
+                            "total_pods_processed": total_pods_processed,
+                            "total_commands_executed": total_commands_executed,
+                            "datapath_commands": len(datapath_commands),
+                            "junos_cli_commands": len(junos_cli_commands),
+                            "http_endpoints": len(http_endpoints),
+                            "clusters_checked": len(clusters_to_check)
+                        }
+                        self._add_command_to_context(command_info)
+                        
+                        return [types.TextContent(type="text", text=summary_text)]
                         
                     except Exception as e:
+                        # Add error context tracking for failed execution
+                        end_time = time.time()
+                        command_info = {
+                            "cluster": cluster_name or "unknown",
+                            "pod": "unknown",
+                            "namespace": "contrail,jcnr",
+                            "command": f"jcnr_summary (cluster: {cluster_name})",
+                            "output": f"Error getting JCNR summary: {str(e)}",
+                            "status": "error",
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "jcnr_summary"
+                        }
+                        self._add_command_to_context(command_info)
+                        
                         return [types.TextContent(type="text", text=f"Error getting JCNR summary: {str(e)}")]
+                
+                elif name == "start_context_gathering":
+                    session_id = arguments.get("session_id")
+                    description = arguments.get("description", "")
+                    
+                    if not session_id:
+                        return [types.TextContent(type="text", text="Error: session_id is required")]
+                    
+                    try:
+                        result = self.context_manager.start_context_session(session_id, description)
+                        
+                        if "error" in result:
+                            return [types.TextContent(type="text", text=f"Error: {result['error']}")]
+                        
+                        output = f"""Context Gathering Started
+=============================
+Session ID: {result['session_id']}
+Status: {result['status']}
+Description: {description or 'No description provided'}
+
+All subsequent commands will now accumulate their outputs for LLM analysis.
+Use 'stop_context_gathering' with the same session_id to finish and get the accumulated context.
+
+Commands that will be tracked:
+- execute_command
+- execute_dpdk_command  
+- execute_agent_command
+- execute_junos_cli_commands
+- pod_command_and_summary
+- jcnr_summary
+- check_core_files
+- analyze_logs"""
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error starting context gathering: {str(e)}")]
+                
+                elif name == "stop_context_gathering":
+                    session_id = arguments.get("session_id")
+                    
+                    if not session_id:
+                        return [types.TextContent(type="text", text="Error: session_id is required")]
+                    
+                    try:
+                        result = self.context_manager.stop_context_session(session_id)
+                        
+                        if "error" in result:
+                            return [types.TextContent(type="text", text=f"Error: {result['error']}")]
+                        
+                        output = f"""Context Gathering Completed
+===============================
+Session ID: {result['session_id']}
+Status: {result['status']}
+Duration: {result.get('session_duration', 'unknown')}
+Commands Executed: {result['commands_executed']}
+Total Output Size: {result['total_output_size']:,} bytes
+
+ACCUMULATED CONTEXT FOR LLM ANALYSIS:
+=====================================
+
+{result['context_for_llm']}
+
+This context contains all command outputs from the session and can be used for comprehensive analysis."""
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error stopping context gathering: {str(e)}")]
+                
+                elif name == "get_context_sessions":
+                    session_id = arguments.get("session_id")
+                    show_all = arguments.get("show_all", False)
+                    
+                    try:
+                        if session_id:
+                            # Get specific session info
+                            session_info = self.context_manager.get_session_info(session_id)
+                            if "error" in session_info:
+                                return [types.TextContent(type="text", text=f"Error: {session_info['error']}")]
+                            
+                            output = f"""Context Session Information
+============================
+Session ID: {session_info['session_id']}
+Description: {session_info.get('description', 'No description')}
+Status: {session_info['status']}
+Started: {session_info['started_at']}
+Stopped: {session_info.get('stopped_at', 'Still active')}
+Duration: {session_info.get('duration', 'unknown')}
+Commands Executed: {session_info['commands_executed']}
+Output Size: {session_info['output_size']:,} bytes
+Active: {session_info['is_active']}
+Context Trimmed: {session_info.get('context_trimmed', False)}
+History Trimmed: {session_info.get('history_trimmed', False)}"""
+                            
+                        else:
+                            # Get active sessions or all sessions
+                            if show_all:
+                                all_sessions = self.context_manager.get_all_sessions_info()
+                                if not all_sessions:
+                                    output = "No context gathering sessions found."
+                                else:
+                                    output = f"All Context Sessions ({len(all_sessions)}):\n"
+                                    output += "=" * 50 + "\n"
+                                    
+                                    for session_info in all_sessions:
+                                        status_icon = "🟢" if session_info['is_active'] else "🔴"
+                                        output += f"{status_icon} {session_info['session_id']}: {session_info.get('description', 'No description')}\n"
+                                        output += f"   Status: {session_info['status']}, Commands: {session_info['commands_executed']}\n"
+                                        output += f"   Duration: {session_info.get('duration', 'unknown')}\n\n"
+                            else:
+                                active_sessions = self.context_manager.get_active_sessions()
+                                if not active_sessions:
+                                    output = "No active context gathering sessions.\nUse show_all=true to see all sessions including stopped ones."
+                                else:
+                                    output = f"Active Context Sessions ({len(active_sessions)}):\n"
+                                    output += "=" * 40 + "\n"
+                                    
+                                    for sid in active_sessions:
+                                        session_info = self.context_manager.get_session_info(sid)
+                                        output += f"🟢 {sid}: {session_info.get('description', 'No description')}\n"
+                                        output += f"   Started: {session_info['started_at']}\n"
+                                        output += f"   Commands: {session_info['commands_executed']}\n"
+                                        output += f"   Output Size: {session_info['output_size']:,} bytes\n\n"
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error getting context sessions: {str(e)}")]
+                
+                elif name == "analyze_context_with_llm":
+                    session_id = arguments.get("session_id")
+                    analysis_type = arguments.get("analysis_type", "troubleshooting")
+                    custom_prompt = arguments.get("custom_prompt", "")
+                    include_raw_context = arguments.get("include_raw_context", False)
+                    
+                    if not session_id:
+                        return [types.TextContent(type="text", text="Error: session_id is required")]
+                    
+                    # Validate custom prompt for custom analysis
+                    if analysis_type == "custom" and not custom_prompt:
+                        return [types.TextContent(type="text", text="Error: custom_prompt is required when analysis_type is 'custom'")]
+                    
+                    try:
+                        # Get the context data for the session
+                        session_info = self.context_manager.get_session_info(session_id)
+                        if "error" in session_info:
+                            return [types.TextContent(type="text", text=f"Error: {session_info['error']}")]
+                        
+                        # Get the formatted context for LLM
+                        context_result = self.context_manager.get_context_for_llm(session_id)
+                        if "error" in context_result:
+                            return [types.TextContent(type="text", text=f"Error getting context: {context_result['error']}")]
+                        
+                        context_data = context_result.get("context_for_llm", "")
+                        if not context_data:
+                            return [types.TextContent(type="text", text=f"No context data found for session '{session_id}'")]
+                        
+                        # Build the prompt based on analysis type
+                        prompts = {
+                            "troubleshooting": "Analyze this network diagnostic context and provide step-by-step troubleshooting recommendations. Identify the most likely root causes and suggest specific commands to verify your hypothesis.",
+                            "summary": "Summarize the key findings from this network diagnostic session. Highlight any anomalies, errors, or concerning patterns found in the data.",
+                            "recommendations": "Based on this network diagnostic context, provide actionable recommendations for:\n1. Immediate fixes needed\n2. Configuration improvements\n3. Monitoring enhancements\n4. Prevention strategies",
+                            "root_cause": "Perform root cause analysis on this network issue context. Trace the sequence of events and identify the fundamental cause of the problem."
+                        }
+                        
+                        if analysis_type == "custom":
+                            analysis_prompt = custom_prompt
+                        else:
+                            analysis_prompt = prompts.get(analysis_type, prompts["troubleshooting"])
+                        
+                        # Format the response with context ready for LLM analysis
+                        output = f"""Context Analysis Request
+========================
+Session: {session_id} ({session_info.get('description', 'No description')})
+Analysis Type: {analysis_type}
+Session Duration: {session_info.get('duration', 'unknown')}
+Commands Executed: {session_info['commands_executed']}
+Output Size: {session_info['output_size']:,} bytes
+
+ANALYSIS PROMPT FOR LLM:
+========================
+{analysis_prompt}
+
+NETWORK DIAGNOSTIC CONTEXT:
+===========================
+{context_data}
+
+---
+
+Please analyze the above network diagnostic context according to the analysis prompt. Focus on providing actionable insights and specific recommendations based on the command outputs and data provided."""
+                        
+                        # Optionally include raw context separately
+                        if include_raw_context:
+                            output += f"""
+
+RAW CONTEXT DATA (for reference):
+=================================
+{context_data}"""
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error preparing context for LLM analysis: {str(e)}")]
                 
                 else:
                     raise ValueError(f"Unknown tool: {name}")

@@ -767,6 +767,106 @@ Reference your pod command list in the cluster configuration:
 
 This intelligent command selection system ensures that each pod type receives appropriate diagnostic commands, making troubleshooting more efficient and targeted.
 
+## Context Manager and LLM Analysis Workflow
+
+The Enhanced MCP Server includes a powerful context management system that allows you to collect command outputs from multiple diagnostic tools and prepare them for LLM analysis. This enables comprehensive network troubleshooting with AI assistance.
+
+### Context Manager Features
+
+- **Session-based Context Gathering**: Start and stop context collection sessions with meaningful identifiers
+- **Automatic Command Tracking**: All MCP tool executions are automatically captured when a session is active
+- **Multi-command Aggregation**: Collect outputs from different tools (DPDK, Junos CLI, log analysis, etc.) into a single context
+- **LLM-ready Formatting**: Prepare context data with analysis prompts for seamless LLM integration
+- **Session Management**: View active and completed sessions, get session statistics
+
+### Workflow Example
+
+#### 1. Start Context Gathering
+```bash
+# Begin collecting diagnostic context
+start_context_gathering session_id="bgp-outage-investigation" description="Production BGP neighbor down issue"
+```
+
+#### 2. Run Diagnostic Commands
+All subsequent commands will be automatically captured:
+
+```bash
+# Check BGP status across clusters
+execute_junos_cli_commands command="show bgp summary" cluster_name="prod"
+execute_junos_cli_commands command="show bgp neighbor 192.168.1.1" cluster_name="prod"
+
+# Analyze DPDK datapath
+execute_dpdk_command command="vif --list" cluster_name="prod"
+execute_dpdk_command command="flow -l" cluster_name="prod"
+
+# Get comprehensive JCNR summary
+jcnr_summary cluster_name="prod"
+
+# Check for core files and log errors
+check_core_files cluster_name="prod"
+analyze_logs cluster_name="prod" pattern="bgp|error"
+```
+
+#### 3. Stop Context Gathering
+```bash
+# Complete the session and get accumulated context
+stop_context_gathering session_id="bgp-outage-investigation"
+```
+
+#### 4. Prepare for LLM Analysis
+```bash
+# Format context for LLM analysis with different prompt types
+analyze_context_with_llm session_id="bgp-outage-investigation" analysis_type="troubleshooting"
+
+# Alternative analysis types:
+# analysis_type="summary" - Get key findings summary
+# analysis_type="recommendations" - Get actionable recommendations  
+# analysis_type="root_cause" - Deep dive root cause analysis
+# analysis_type="custom" custom_prompt="Focus on BGP timers and suggest optimizations"
+```
+
+### Session Management
+
+```bash
+# View all active sessions
+get_context_sessions
+
+# View specific session details
+get_context_sessions session_id="bgp-outage-investigation"
+
+# View all sessions (active and completed)
+get_context_sessions show_all=true
+```
+
+### Analysis Types
+
+The `analyze_context_with_llm` tool provides several built-in analysis prompts:
+
+- **`troubleshooting`** (default): Step-by-step troubleshooting recommendations with root cause identification
+- **`summary`**: Key findings and patterns from the diagnostic session
+- **`recommendations`**: Actionable recommendations for immediate fixes, improvements, and prevention
+- **`root_cause`**: Deep analysis tracing the sequence of events to fundamental causes
+- **`custom`**: Use your own analysis prompt for specific investigations
+
+### Integration with MCP Clients
+
+The context manager follows MCP architecture principles:
+
+1. **Server Role**: Collects and formats diagnostic context data
+2. **Client Role**: Sends formatted context to chosen LLM (OpenAI, Anthropic, etc.)
+3. **No LLM Dependencies**: Server doesn't make LLM API calls directly
+4. **Flexible LLM Choice**: Works with any LLM supported by your MCP client
+
+### Best Practices
+
+1. **Use Descriptive Session IDs**: Choose meaningful names like "bgp-outage-dec16" or "interface-flap-investigation"
+2. **Add Descriptions**: Provide context about what you're investigating
+3. **Logical Command Sequence**: Run commands in a logical troubleshooting order
+4. **Choose Appropriate Analysis Type**: Select the analysis type that matches your investigation needs
+5. **Review Session Data**: Use `get_context_sessions` to review collected data before analysis
+
+This workflow enables you to systematically collect network diagnostic data and leverage LLM analysis for faster, more comprehensive troubleshooting.
+
 ## Security Considerations
 
 #### General Security
