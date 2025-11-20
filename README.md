@@ -336,6 +336,15 @@ This server implements the Model Context Protocol with support for both transpor
      - **Configurable Commands**: Uses JSON configuration files for customizable command/endpoint lists
      - **Enhanced Output**: Structured tables, summary statistics, and detailed analysis
 
+### Context Management Tools
+- **start_context_gathering**: Start collecting command outputs for LLM analysis
+- **stop_context_gathering**: Stop collecting and return accumulated context for LLM analysis
+- **resume_context_gathering**: Resume a stopped context session to continue collecting commands
+- **get_context_sessions**: Get information about active and completed context sessions
+- **analyze_context_with_llm**: Format stored context session for LLM analysis with custom prompts
+- **append_last_command_to_context**: Append last executed command to a specific context session
+- **get_last_command_info**: Get information about the last executed command
+
 ## JCNR-Specific Features
 
 YAMS provides specialized tools for **Juniper Cloud-Native Router (JCNR)** deployments, offering deep visibility into datapath operations and network state.
@@ -776,6 +785,8 @@ The Enhanced MCP Server includes a powerful context management system that allow
 - **Session-based Context Gathering**: Start and stop context collection sessions with meaningful identifiers
 - **Automatic Command Tracking**: All MCP tool executions are automatically captured when a session is active
 - **Multi-command Aggregation**: Collect outputs from different tools (DPDK, Junos CLI, log analysis, etc.) into a single context
+- **Manual Command Addition**: Append specific command outputs to any session using `append_last_command_to_context`
+- **Session State Control**: Sessions remain stopped after appending unless explicitly resumed
 - **LLM-ready Formatting**: Prepare context data with analysis prompts for seamless LLM integration
 - **Session Management**: View active and completed sessions, get session statistics
 
@@ -823,6 +834,74 @@ analyze_context_with_llm session_id="bgp-outage-investigation" analysis_type="tr
 # analysis_type="recommendations" - Get actionable recommendations  
 # analysis_type="root_cause" - Deep dive root cause analysis
 # analysis_type="custom" custom_prompt="Focus on BGP timers and suggest optimizations"
+```
+
+### Manual Command Addition Workflow
+
+Sometimes you need to add commands to a context session after the session has been stopped, or you want to selectively add specific commands without automatic collection. The context manager provides manual command addition capabilities:
+
+#### Adding Commands to Stopped Sessions
+```bash
+# Start investigation session
+start_context_gathering session_id="interface-analysis" description="Investigating interface flapping"
+
+# Run some commands (automatically collected)
+execute_dpdk_command command="vif --list" cluster_name="prod"
+list_pods namespace="contrail" cluster_name="prod"
+
+# Stop the session
+stop_context_gathering session_id="interface-analysis"
+
+# Later, run additional command outside of the session
+execute_junos_cli_commands command="show interfaces extensive" cluster_name="prod"
+
+# Add the last command to the stopped session
+append_last_command_to_context session_id="interface-analysis"
+
+# Session remains STOPPED - use explicit resume if you want automatic collection again
+resume_context_gathering session_id="interface-analysis"
+
+# Continue investigation (now auto-collected again)
+execute_dpdk_command command="dropstats" cluster_name="prod"
+```
+
+#### Selective Command Addition
+```bash
+# Run commands without any active session
+execute_dpdk_command command="vif --get 0" cluster_name="prod"
+execute_dpdk_command command="vif --get 1" cluster_name="prod"  
+execute_agent_command command="contrail-status" cluster_name="prod"
+
+# Check what command is available to append
+get_last_command_info
+
+# Create session and add only the last (most relevant) command
+start_context_gathering session_id="vif-analysis" description="Virtual interface analysis"
+append_last_command_to_context session_id="vif-analysis"
+
+# Session stays active for future commands
+execute_junos_cli_commands command="show interfaces terse" cluster_name="prod"
+```
+
+#### Session State Management
+The context manager provides explicit control over session states:
+
+- **Active Sessions**: Automatically collect all command outputs
+- **Stopped Sessions**: No automatic collection, but can manually append commands
+- **Append Behavior**: `append_last_command_to_context` preserves session state
+- **Explicit Resume**: Use `resume_context_gathering` to reactivate automatic collection
+
+```bash
+# Session state examples
+get_context_sessions                                    # View active sessions only
+get_context_sessions show_all=true                     # View all sessions (active + stopped)
+get_context_sessions session_id="interface-analysis"   # View specific session details
+
+# Session shows:
+# - Status: "active" or "stopped"  
+# - Commands executed count
+# - Total output size
+# - Duration
 ```
 
 ### Session Management
