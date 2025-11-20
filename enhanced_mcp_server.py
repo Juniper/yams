@@ -72,6 +72,7 @@ class ContextManager:
         self.max_context_size = max_context_size
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self.active_sessions: set = set()
+        self.last_command_info: Optional[Dict[str, Any]] = None  # Store last executed command info
         
     def start_context_session(self, session_id: str, description: str = "") -> Dict[str, Any]:
         """Start a new context gathering session.
@@ -142,6 +143,9 @@ class ContextManager:
         Args:
             command_info: Dictionary containing command execution details
         """
+        # Store the last command info for potential later use
+        self.last_command_info = command_info.copy()
+        
         if not self.active_sessions:
             return  # No active sessions to add to
             
@@ -171,6 +175,9 @@ class ContextManager:
     
     def _add_command_to_session_internal(self, session_id: str, command_info: Dict[str, Any]) -> None:
         """Internal method to add command to a specific session.
+        
+        This method bypasses the active session check and adds the command directly.
+        It's used for manual append operations and should be used carefully.
         
         Args:
             session_id: Session ID to add command to
@@ -439,6 +446,89 @@ complete troubleshooting or analysis session.
             "commands_count": session["total_commands"],
             "total_size_bytes": session["total_output_size"],
             "session_status": session["status"]
+        }
+    
+    def get_last_command_info(self) -> Optional[Dict[str, Any]]:
+        """Get information about the last executed command.
+        
+        Returns:
+            Dictionary with last command info or None if no commands executed
+        """
+        return self.last_command_info.copy() if self.last_command_info else None
+    
+    def resume_context_session(self, session_id: str) -> Dict[str, Any]:
+        """Resume a stopped context gathering session to continue collecting commands.
+        
+        Args:
+            session_id: Session ID to resume
+            
+        Returns:
+            Dictionary with resume result
+        """
+        if session_id not in self.sessions:
+            return {"error": f"Session '{session_id}' not found"}
+        
+        if session_id in self.active_sessions:
+            return {"error": f"Session '{session_id}' is already active"}
+        
+        session = self.sessions[session_id]
+        session["status"] = "active"
+        session["resumed_at"] = time.time()
+        session["last_updated"] = time.time()
+        self.active_sessions.add(session_id)
+        
+        logger.info(f"Resumed context gathering session: {session_id}")
+        return {
+            "session_id": session_id,
+            "status": "resumed",
+            "message": f"Context gathering resumed for session '{session_id}'",
+            "previous_commands": session["total_commands"],
+            "total_output_size": session["total_output_size"]
+        }
+
+    def append_last_command_to_context(self, session_id: str) -> Dict[str, Any]:
+        """Append the last executed command to a specific context session.
+        
+        The session remains in its current state (active or stopped). If the session is 
+        stopped, it will remain stopped after appending. Use resume_context_gathering 
+        explicitly to reactivate automatic command collection.
+        
+        Args:
+            session_id: Session ID to append the last command to
+            
+        Returns:
+            Dictionary with append result
+        """
+        if not self.last_command_info:
+            return {"error": "No last command available to append"}
+        
+        if session_id not in self.sessions:
+            return {"error": f"Session '{session_id}' not found"}
+        
+        session = self.sessions[session_id]
+        session_was_active = session_id in self.active_sessions
+        
+        # Add the last command to the specified session (without changing session status)
+        self._add_command_to_session_internal(session_id, self.last_command_info)
+        
+        # Get command summary for response
+        command_summary = f"{self.last_command_info.get('tool_used', 'unknown')} - {self.last_command_info.get('command', 'unknown command')[:50]}"
+        if len(self.last_command_info.get('command', '')) > 50:
+            command_summary += "..."
+        
+        message_text = f"Last command appended to session '{session_id}'"
+        if not session_was_active:
+            message_text += " (session remains stopped - use resume_context_gathering to activate)"
+        
+        return {
+            "session_id": session_id,
+            "status": "appended",
+            "message": message_text,
+            "command_summary": command_summary,
+            "command_status": self.last_command_info.get('status', 'unknown'),
+            "output_size": len(self.last_command_info.get('output', '')),
+            "session_was_active": session_was_active,
+            "session_remains_active": session_was_active
         }
 
 # Configure logging
@@ -2242,13 +2332,9 @@ class EnhancedMCPServer:
     def _add_command_to_context(self, command_info: Dict[str, Any]) -> None:
         """Add command execution information to any active context sessions."""
         try:
-            # Check if there are any active context sessions
-            active_sessions = self.context_manager.get_active_sessions()
-            if active_sessions:
-                # Add this command to all active sessions
-                for session_id in active_sessions:
-                    self.context_manager.add_command_to_session(session_id, command_info)
-                logger.debug(f"Added command to {len(active_sessions)} active context sessions")
+            # This will ALWAYS store last_command_info AND add to active sessions if any exist
+            self.context_manager.add_command_output(command_info)
+            logger.debug(f"Added command to context manager")
         except Exception as e:
             logger.warning(f"Failed to add command to context: {e}")
 
@@ -2560,6 +2646,20 @@ class EnhancedMCPServer:
                         }
                     ),
                     types.Tool(
+                        name="resume_context_gathering",
+                        description="Resume a stopped context gathering session to continue collecting commands. Preserves all existing context and allows new commands to be added.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "Session ID to resume"
+                                }
+                            },
+                            "required": ["session_id"]
+                        }
+                    ),
+                    types.Tool(
                         name="get_context_sessions",
                         description="Get information about active and completed context gathering sessions.",
                         inputSchema={
@@ -2604,6 +2704,29 @@ class EnhancedMCPServer:
                                 }
                             },
                             "required": ["session_id"]
+                        }
+                    ),
+                    types.Tool(
+                        name="append_last_command_to_context",
+                        description="Append the output of the last executed command to a specific context session. The session remains in its current state - stopped sessions stay stopped and require explicit resume_context_gathering to reactivate.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "Session ID to append the last command to"
+                                }
+                            },
+                            "required": ["session_id"]
+                        }
+                    ),
+                    types.Tool(
+                        name="get_last_command_info",
+                        description="Get information about the last executed command that can be appended to context sessions.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {},
+                            "required": []
                         }
                     )
                 ]
@@ -2967,42 +3090,60 @@ class EnhancedMCPServer:
                     max_age_days = arguments.get("max_age_days", 7)
                     
                     try:
+                        start_time = time.time()
                         results = self.k8s_manager.check_core_files(cluster_name, search_paths, max_age_days)
+                        end_time = time.time()
                         
                         if not results:
-                            return [types.TextContent(type="text", text="No core files found on any nodes")]
-                        
-                        output_lines = [f"Core Files Check Results (showing files from last {max_age_days} days)"]
-                        output_lines.append("=" * 60)
-                        
-                        total_core_files = 0
-                        for result in results:
-                            cluster = result.get("cluster", "unknown")
-                            node = result.get("node", "unknown")
-                            core_files = result.get("core_files", [])
-                            error = result.get("error")
+                            result_text = "No core files found on any nodes"
+                        else:
+                            output_lines = [f"Core Files Check Results (showing files from last {max_age_days} days)"]
+                            output_lines.append("=" * 60)
                             
-                            output_lines.append(f"\nCluster: {cluster}")
-                            output_lines.append(f"Node: {node}")
+                            total_core_files = 0
+                            for result in results:
+                                cluster = result.get("cluster", "unknown")
+                                node = result.get("node", "unknown")
+                                core_files = result.get("core_files", [])
+                                error = result.get("error")
+                                
+                                output_lines.append(f"\nCluster: {cluster}")
+                                output_lines.append(f"Node: {node}")
+                                
+                                if error:
+                                    output_lines.append(f"Error: {error}")
+                                elif core_files:
+                                    output_lines.append(f"Core files found ({len(core_files)}):")
+                                    for core_file in core_files:
+                                        total_core_files += 1
+                                        output_lines.append(f"  - {core_file['path']}")
+                                        output_lines.append(f"    Size: {core_file['size']}")
+                                        output_lines.append(f"    Modified: {core_file['modified']}")
+                                        output_lines.append(f"    Age: {core_file['age_days']} days")
+                                else:
+                                    output_lines.append("No core files found")
+                                output_lines.append("-" * 40)
                             
-                            if error:
-                                output_lines.append(f"Error: {error}")
-                            elif core_files:
-                                output_lines.append(f"Core files found ({len(core_files)}):")
-                                for core_file in core_files:
-                                    total_core_files += 1
-                                    output_lines.append(f"  - {core_file['path']}")
-                                    output_lines.append(f"    Size: {core_file['size']}")
-                                    output_lines.append(f"    Modified: {core_file['modified']}")
-                                    output_lines.append(f"    Age: {core_file['age_days']} days")
-                            else:
-                                output_lines.append("No core files found")
-                            output_lines.append("-" * 40)
+                            output_lines.insert(1, f"Total core files found: {total_core_files}")
+                            output_lines.insert(2, "=" * 60)
+                            result_text = "\n".join(output_lines)
                         
-                        output_lines.insert(1, f"Total core files found: {total_core_files}")
-                        output_lines.insert(2, "=" * 60);
+                        # Add to context if active sessions exist
+                        command_info = {
+                            "cluster": cluster_name or "multiple",
+                            "pod": "N/A",
+                            "namespace": "N/A",
+                            "command": f"check_core_files --max_age_days {max_age_days}" + (f" --cluster_name {cluster_name}" if cluster_name else ""),
+                            "output": result_text,
+                            "status": "success",
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "check_core_files",
+                            "total_core_files": sum(len(r.get('core_files', [])) for r in results),
+                            "nodes_checked": len(results)
+                        }
+                        self._add_command_to_context(command_info)
                         
-                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                        return [types.TextContent(type="text", text=result_text)]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error checking core files: {str(e)}")]
                 
@@ -3019,91 +3160,110 @@ class EnhancedMCPServer:
                     pattern = arguments.get("pattern")
                     
                     try:
+                        start_time = time.time()
                         results = self.k8s_manager.analyze_logs(cluster_name, pod_name, namespace, log_paths, max_age_days, max_lines, pattern)
+                        end_time = time.time()
                         
                         if not results:
-                            return [types.TextContent(type="text", text="No clusters found or accessible for log analysis")]
-                        
-                        # Determine the analysis scope for the title
-                        if pod_name and namespace:
-                            scope = f"for pod {pod_name} in namespace {namespace}"
+                            result_text = "No clusters found or accessible for log analysis"
                         else:
-                            scope = "for all cluster nodes"
-                        
-                        output_lines = [f"Log Analysis Results {scope} (last {max_age_days} days, max {max_lines} lines)"]
-                        output_lines.append("=" * 60)
-                        
-                        for result in results:
-                            cluster = result.get("cluster", "unknown")
-                            pod = result.get("pod")
-                            namespace_result = result.get("namespace")
-                            node = result.get("node", "unknown")
-                            error = result.get("error")
-                            log_analysis = result.get("log_analysis", {})
-                            
-                            output_lines.append(f"\nCluster: {cluster}")
-                            if pod and namespace_result:
-                                output_lines.append(f"Pod: {pod}")
-                                output_lines.append(f"Namespace: {namespace_result}")
-                                output_lines.append(f"Node: {node}")
+                            # Determine the analysis scope for the title
+                            if pod_name and namespace:
+                                scope = f"for pod {pod_name} in namespace {namespace}"
                             else:
-                                output_lines.append(f"Node: {node}")
-                                pod_used = result.get("pod_used")
-                                if pod_used:
-                                    output_lines.append(f"Analysis pod: {pod_used}")
+                                scope = "for all cluster nodes"
                             
-                            if error:
-                                output_lines.append(f"Error: {error}")
-                            else:
-                                # Recent log files
-                                recent_files = log_analysis.get("recent_log_files", [])
-                                if recent_files:
-                                    output_lines.append(f"Recent log files ({len(recent_files)}):")
-                                    for log_file in recent_files[:5]:  # Show first 5
-                                        output_lines.append(f"  - {log_file}")
-                                    if len(recent_files) > 5:
-                                        output_lines.append(f"  ... and {len(recent_files) - 5} more files")
-                                else:
-                                    output_lines.append("No recent log files found")
-                                
-                                # Error patterns
-                                error_patterns = log_analysis.get("error_patterns", [])
-                                if error_patterns:
-                                    output_lines.append(f"\nError/Warning patterns found ({len(error_patterns)}):")
-                                    for error_line in error_patterns[:10]:  # Show first 10
-                                        output_lines.append(f"  {error_line}")
-                                    if len(error_patterns) > 10:
-                                        output_lines.append(f"  ... and {len(error_patterns) - 10} more entries")
-                                else:
-                                    output_lines.append("\nNo error patterns found")
-                                
-                                # Log directory listing
-                                log_directory_listing = log_analysis.get("log_directory_listing", [])
-                                if log_directory_listing:
-                                    output_lines.append(f"\nLog directory contents:")
-                                    for listing_line in log_directory_listing:
-                                        output_lines.append(f"  {listing_line}")
-                                
-                                # Large files
-                                large_files = log_analysis.get("large_files", [])
-                                if large_files:
-                                    output_lines.append(f"\nLarge log files (>10MB):")
-                                   
-                                    for large_file in large_files[:5]:  # Show first 5
-                                        output_lines.append(f"  {large_file}")
-                                    if len(large_files) > 5:
-                                        output_lines.append(f"  ... and {len(large_files) - 5} more files")
-                                
-                                # Recent messages sample
-                                recent_messages = log_analysis.get("recent_messages", [])
-                                if recent_messages:
-                                    output_lines.append(f"\nRecent system messages (last {min(len(recent_messages), 5)}):")
-                                    for msg in recent_messages[-5:]:  # Show last 5
-                                        output_lines.append(f"  {msg}")
+                            output_lines = [f"Log Analysis Results {scope} (last {max_age_days} days, max {max_lines} lines)"]
+                            output_lines.append("=" * 60)
                             
-                            output_lines.append("-" * 40)
+                            for result in results:
+                                cluster = result.get("cluster", "unknown")
+                                pod = result.get("pod")
+                                namespace_result = result.get("namespace")
+                                node = result.get("node", "unknown")
+                                error = result.get("error")
+                                log_analysis = result.get("log_analysis", {})
+                                
+                                output_lines.append(f"\nCluster: {cluster}")
+                                if pod and namespace_result:
+                                    output_lines.append(f"Pod: {pod}")
+                                    output_lines.append(f"Namespace: {namespace_result}")
+                                    output_lines.append(f"Node: {node}")
+                                else:
+                                    output_lines.append(f"Node: {node}")
+                                    pod_used = result.get("pod_used")
+                                    if pod_used:
+                                        output_lines.append(f"Analysis pod: {pod_used}")
+                                
+                                if error:
+                                    output_lines.append(f"Error: {error}")
+                                else:
+                                    # Recent log files
+                                    recent_files = log_analysis.get("recent_log_files", [])
+                                    if recent_files:
+                                        output_lines.append(f"Recent log files ({len(recent_files)}):")
+                                        for log_file in recent_files[:5]:  # Show first 5
+                                            output_lines.append(f"  - {log_file}")
+                                        if len(recent_files) > 5:
+                                            output_lines.append(f"  ... and {len(recent_files) - 5} more files")
+                                    else:
+                                        output_lines.append("No recent log files found")
+                                    
+                                    # Error patterns
+                                    error_patterns = log_analysis.get("error_patterns", [])
+                                    if error_patterns:
+                                        output_lines.append(f"\nError/Warning patterns found ({len(error_patterns)}):")
+                                        for error_line in error_patterns[:10]:  # Show first 10
+                                            output_lines.append(f"  {error_line}")
+                                        if len(error_patterns) > 10:
+                                            output_lines.append(f"  ... and {len(error_patterns) - 10} more entries")
+                                    else:
+                                        output_lines.append("\nNo error patterns found")
+                                    
+                                    # Log directory listing
+                                    log_directory_listing = log_analysis.get("log_directory_listing", [])
+                                    if log_directory_listing:
+                                        output_lines.append(f"\nLog directory contents:")
+                                        for listing_line in log_directory_listing:
+                                            output_lines.append(f"  {listing_line}")
+                                    
+                                    # Large files
+                                    large_files = log_analysis.get("large_files", [])
+                                    if large_files:
+                                        output_lines.append(f"\nLarge log files (>10MB):")
+                                       
+                                        for large_file in large_files[:5]:  # Show first 5
+                                            output_lines.append(f"  {large_file}")
+                                        if len(large_files) > 5:
+                                            output_lines.append(f"  ... and {len(large_files) - 5} more files")
+                                    
+                                    # Recent messages sample
+                                    recent_messages = log_analysis.get("recent_messages", [])
+                                    if recent_messages:
+                                        output_lines.append(f"\nRecent system messages (last {min(len(recent_messages), 5)}):")
+                                        for msg in recent_messages[-5:]:  # Show last 5
+                                            output_lines.append(f"  {msg}")
+                                
+                                output_lines.append("-" * 40)
+                            
+                            result_text = "\n".join(output_lines)
                         
-                        return [types.TextContent(type="text", text="\n".join(output_lines))]
+                        # Add to context if active sessions exist
+                        command_info = {
+                            "cluster": cluster_name or "multiple",
+                            "pod": pod_name or "N/A",
+                            "namespace": namespace or "N/A",
+                            "command": f"analyze_logs --max_age_days {max_age_days} --max_lines {max_lines}" + (f" --cluster_name {cluster_name}" if cluster_name else "") + (f" --pod_name {pod_name}" if pod_name else "") + (f" --namespace {namespace}" if namespace else ""),
+                            "output": result_text,
+                            "status": "success",
+                            "execution_time": round(end_time - start_time, 3),
+                            "tool_used": "analyze_logs",
+                            "nodes_analyzed": len(results),
+                            "scope": scope
+                        }
+                        self._add_command_to_context(command_info)
+                        
+                        return [types.TextContent(type="text", text=result_text)]
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error analyzing logs: {str(e)}")]
                 
@@ -3865,6 +4025,45 @@ This context contains all command outputs from the session and can be used for c
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error stopping context gathering: {str(e)}")]
                 
+                elif name == "resume_context_gathering":
+                    session_id = arguments.get("session_id")
+                    
+                    if not session_id:
+                        return [types.TextContent(type="text", text="Error: session_id is required")]
+                    
+                    try:
+                        result = self.context_manager.resume_context_session(session_id)
+                        
+                        if "error" in result:
+                            return [types.TextContent(type="text", text=f"Error: {result['error']}")]
+                        
+                        output = f"""Context Gathering Resumed
+==============================
+Session ID: {result['session_id']}
+Status: {result['status']}
+Message: {result['message']}
+Previous Commands: {result['previous_commands']}
+Previous Output Size: {result['total_output_size']:,} bytes
+
+✅ Session is now ACTIVE again and will automatically collect new command outputs.
+
+All existing context has been preserved. New commands will be added to the existing context.
+
+Commands that will be tracked:
+- execute_command
+- execute_dpdk_command  
+- execute_agent_command
+- execute_junos_cli_commands
+- pod_command_and_summary
+- jcnr_summary
+- check_core_files
+- analyze_logs"""
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error resuming context gathering: {str(e)}")]
+                
                 elif name == "get_context_sessions":
                     session_id = arguments.get("session_id")
                     show_all = arguments.get("show_all", False)
@@ -3999,6 +4198,87 @@ RAW CONTEXT DATA (for reference):
                         
                     except Exception as e:
                         return [types.TextContent(type="text", text=f"Error preparing context for LLM analysis: {str(e)}")]
+                
+                elif name == "append_last_command_to_context":
+                    session_id = arguments.get("session_id")
+                    
+                    if not session_id:
+                        return [types.TextContent(type="text", text="Error: session_id is required")]
+                    
+                    try:
+                        result = self.context_manager.append_last_command_to_context(session_id)
+                        
+                        if "error" in result:
+                            return [types.TextContent(type="text", text=f"Error: {result['error']}")]
+                        
+                        # Updated output without auto-resume information
+                        output = f"""Last Command Appended to Context
+===================================
+Session ID: {result['session_id']}
+Status: {result['status']}
+Message: {result['message']}
+
+Command Details:
+- Command: {result['command_summary']}
+- Status: {result['command_status']}
+- Output Size: {result['output_size']:,} bytes
+- Session was previously active: {result['session_was_active']}
+- Session remains active: {result.get('session_remains_active', False)}
+
+{'✅ Session is active and collecting commands.' if result.get('session_remains_active') else '⏹️ Session is STOPPED. Use resume_context_gathering to activate automatic collection.'}
+
+The last executed command has been successfully added to the context session '{session_id}'. Use 'get_context_sessions' to see updated session information."""
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error appending last command to context: {str(e)}")]
+                
+                elif name == "get_last_command_info":
+                    try:
+                        last_command = self.context_manager.get_last_command_info()
+                        
+                        if not last_command:
+                            output = """No Last Command Available
+=============================
+Status: No commands have been executed yet
+
+To use the append_last_command_to_context tool, you need to execute a command first.
+
+Try one of these commands:
+- execute_command --pod_name <pod> --namespace <ns> --command "ls"
+- execute_dpdk_command --command "vif --list"
+- execute_agent_command --command "ps aux"
+- execute_junos_cli_commands --command "show version"
+- list_pods --namespace default
+
+After executing any command, you can then use:
+- append_last_command_to_context --session_id <your-session>"""
+                        else:
+                            import datetime
+                            
+                            output = f"""Last Command Information
+===========================
+Tool Used: {last_command.get('tool_used', 'unknown')}
+Cluster: {last_command.get('cluster', 'unknown')}
+Pod: {last_command.get('pod', 'unknown')}
+Namespace: {last_command.get('namespace', 'unknown')}
+Container: {last_command.get('container', 'unknown')}
+Command: {last_command.get('command', 'unknown')}
+Status: {last_command.get('status', 'unknown')}
+Execution Time: {last_command.get('execution_time', 0):.2f}s
+Output Size: {len(last_command.get('output', '')):,} bytes
+
+Command Summary:
+{last_command.get('command', 'unknown command')[:100]}...
+
+This command is available to append to any context session using:
+append_last_command_to_context --session_id <your-session-id>"""
+                        
+                        return [types.TextContent(type="text", text=output)]
+                        
+                    except Exception as e:
+                        return [types.TextContent(type="text", text=f"Error getting last command info: {str(e)}")]
                 
                 else:
                     raise ValueError(f"Unknown tool: {name}")
