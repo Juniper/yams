@@ -25,7 +25,6 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
-from mcp.types import ServerCapabilities, ToolsCapability, ResourcesCapability
 
 try:
     from kubernetes import client, config
@@ -57,11 +56,127 @@ try:
 except ImportError:
     pass
 
+# Configuration Constants
+class Config:
+    """Centralized configuration constants for the Enhanced MCP Server."""
+    
+    # Context Manager Settings
+    DEFAULT_MAX_HISTORY = 100
+    DEFAULT_MAX_CONTEXT_SIZE = 10 * 1024 * 1024  # 10MB
+    CONTEXT_TRUNCATE_THRESHOLD = 200  # lines
+    CONTEXT_TRUNCATE_KEEP_LINES = 100  # lines to keep from start/end
+    CONTEXT_OUTPUT_TRUNCATE_SIZE = 2000  # characters
+    
+    # Parallel Execution Settings
+    MAX_WORKERS = 10
+    CLUSTER_TIMEOUT_SECONDS = 60
+    CORE_FILES_TIMEOUT_SECONDS = 120
+    
+    # Command Execution Settings
+    DEFAULT_TIMEOUT_SECONDS = 30
+    DEFAULT_MAX_OUTPUT_SIZE = 1048576  # 1MB
+    DEFAULT_RETRY_COUNT = 1
+    DEFAULT_CONTINUE_ON_ERROR = True
+    
+    # HTTP Settings
+    HTTP_TIMEOUT_SECONDS = 10
+    HTTP_CONNECTION_CLOSE_HEADERS = {'Connection': 'close'}
+    CURL_TIMEOUT_SECONDS = 10
+    CURL_CONNECT_TIMEOUT_SECONDS = 5
+    
+    # SSH Tunnel Settings
+    SSH_DEFAULT_PORT = 22
+    SSH_KEEPALIVE_SECONDS = 30
+    K8S_DEFAULT_HOST = "localhost"
+    K8S_DEFAULT_PORT = 6443
+    K8S_DEFAULT_LOCAL_PORT = 6443
+    
+    # Log Analysis Settings
+    DEFAULT_MAX_AGE_DAYS = 7
+    DEFAULT_MAX_LINES = 100
+    DEFAULT_LOG_FILES_LIMIT = 10
+    LOG_LINES_SAMPLE_SIZE = 20  # for recent logs listing
+    ERROR_PATTERNS_LIMIT = 50
+    LARGE_FILES_LIMIT = 10
+    LOG_TAIL_LINES_DIVISOR = 5  # max_lines // 5 for recent messages
+    
+    # JCNR Analysis Settings
+    JCNR_LOG_LINES_DIVISOR_THIRD = 3  # max_lines // 3
+    JCNR_LOG_LINES_DIVISOR_HALF = 2   # max_lines // 2
+    JCNR_LOG_HEAD_LIMIT = 200
+    
+    # Core File Search Settings
+    DEFAULT_CORE_SEARCH_PATHS = [
+        "/cores",
+        "/var/cores", 
+        "/var/crash",
+        "/var/log/crash",
+        "/var/log/cores"
+    ]
+    CORE_FILE_SIZE_THRESHOLD_MB = 1.0  # MB threshold for size display
+    
+    # XML Table Formatting Settings
+    NH_TABLE_MAX_ROWS = 20
+    ROUTE_TABLE_MAX_ROWS = 15
+    INTERFACE_TABLE_MAX_ROWS = 10
+    
+    # JCNR Command Configuration Defaults
+    JCNR_DEFAULT_HTTP_PORT = 8085
+    JCNR_DEFAULT_MAX_DISPLAY_LINES = 50
+    JCNR_DEFAULT_MAX_HTTP_DISPLAY_CHARS = 5000
+    JCNR_DEFAULT_ENABLE_DETAILED_ANALYSIS = True
+    JCNR_DEFAULT_TRUNCATE_LARGE_OUTPUTS = True
+    JCNR_DEFAULT_MAX_TABLE_ROWS = 20
+    JCNR_DEFAULT_MAX_TABLE_ROWS_ROUTES = 15
+    JCNR_DEFAULT_MAX_TABLE_ROWS_INTERFACES = 10
+    
+    # JCNR Default HTTP Endpoints
+    JCNR_DEFAULT_HTTP_ENDPOINTS = {
+        "nh_list": "Snh_NhListReq?type=&nh_index=&policy_enabled=",
+        "vrf_list": "Snh_VrfListReq?name=",
+        "inet4_routes": "Snh_Inet4UcRouteReq?x=0"
+    }
+    
+    # Error Patterns
+    DEFAULT_ERROR_PATTERNS = "error|fail|panic|segfault|oops|bug|critical|fatal"
+    JCNR_ERROR_PATTERNS = "error|fail|panic|segfault|core.*dump|exception|abort|fatal|crash|dpdk.*error|vrouter.*error|contrail.*error"
+    
+    # Pod Command Execution Settings
+    POD_COMMAND_PREVIEW_LINES_THRESHOLD = 3
+    POD_COMMAND_OUTPUT_TRUNCATE_SIZE = 500  # characters for command summaries
+    
+    # Server Settings
+    DEFAULT_HTTP_PORT = 40041
+    SERVER_VERSION = "2.1.0"
+    MCP_PROTOCOL_VERSION = "2024-11-05"
+    
+    # Logging Settings
+    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    
+    # String Constants
+    OUTPUT_TRUNCATED_MESSAGE = "... [OUTPUT TRUNCATED FOR CONTEXT] ..."
+    OUTPUT_TRUNCATED_SIZE_MESSAGE = "... [OUTPUT TRUNCATED DUE TO SIZE LIMIT]"
+    MIDDLE_SECTION_TRIMMED_MESSAGE = "\n... [MIDDLE SECTION TRIMMED FOR SIZE] ...\n"
+    OUTPUT_TRUNCATED_DISPLAY_MESSAGE = "[... {} more {} truncated for display]"
+    
+    # Namespaces
+    CONTRAIL_NAMESPACE = "contrail"
+    JCNR_NAMESPACE = "jcnr"
+    KUBE_SYSTEM_NAMESPACE = "kube-system"
+    SYSTEM_NAMESPACES = [KUBE_SYSTEM_NAMESPACE, CONTRAIL_NAMESPACE, JCNR_NAMESPACE]
+    
+    # Pod Type Identifiers
+    DPDK_POD_IDENTIFIERS = ["vrdpdk", "vrouter-nodes-vrdpdk"]
+    AGENT_POD_IDENTIFIERS = ["vrouter-nodes"]
+    AGENT_POD_EXCLUDES = ["vrdpdk"]
+    JUNOS_POD_IDENTIFIERS = ["crpd", "csrx"]
+    SYSTEM_CONTAINER_IDENTIFIERS = ["system", "node"]
+
 # Context Manager class (embedded to avoid module import issues)
 class ContextManager:
     """Manages context gathering for LLM analysis."""
     
-    def __init__(self, max_history: int = 100, max_context_size: int = 10*1024*1024):
+    def __init__(self, max_history: int = Config.DEFAULT_MAX_HISTORY, max_context_size: int = Config.DEFAULT_MAX_CONTEXT_SIZE):
         """Initialize the context manager.
         
         Args:
@@ -241,8 +356,8 @@ class ContextManager:
         execution_time = command_info.get("execution_time", 0)
         
         # Truncate very long outputs for context
-        if len(output) > 2000:
-            output = output[:2000] + "\n... [OUTPUT TRUNCATED FOR CONTEXT] ..."
+        if len(output) > Config.CONTEXT_OUTPUT_TRUNCATE_SIZE:
+            output = output[:Config.CONTEXT_OUTPUT_TRUNCATE_SIZE] + Config.OUTPUT_TRUNCATED_MESSAGE
         
         return f"""
 [{timestamp}] COMMAND EXECUTED
@@ -268,11 +383,11 @@ Output:
             Trimmed context string
         """
         lines = context.split('\n')
-        if len(lines) > 200:
+        if len(lines) > Config.CONTEXT_TRUNCATE_THRESHOLD:
             # Keep first 100 and last 100 lines
-            trimmed = (lines[:100] + 
-                      ["\n... [MIDDLE SECTION TRIMMED FOR SIZE] ...\n"] + 
-                      lines[-100:])
+            trimmed = (lines[:Config.CONTEXT_TRUNCATE_KEEP_LINES] + 
+                      [Config.MIDDLE_SECTION_TRIMMED_MESSAGE] + 
+                      lines[-Config.CONTEXT_TRUNCATE_KEEP_LINES:])
             return '\n'.join(trimmed)
         return context
     
@@ -534,7 +649,7 @@ complete troubleshooting or analysis session.
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format=Config.LOG_FORMAT
 )
 logger = logging.getLogger(__name__)
 
@@ -613,15 +728,15 @@ class KubernetesManager:
         
         try:
             ssh_host = ssh_config["host"]
-            ssh_port = ssh_config.get("port", 22)
+            ssh_port = ssh_config.get("port", Config.SSH_DEFAULT_PORT)
             ssh_username = ssh_config["username"]
             ssh_key_path = ssh_config.get("key_path")
             ssh_password = ssh_config.get("password")
             
             # Kubernetes API server details (accessible from SSH host)
-            k8s_host = ssh_config.get("k8s_host", "localhost")
-            k8s_port = ssh_config.get("k8s_port", 6443)
-            local_port = ssh_config.get("local_port", 6443)
+            k8s_host = ssh_config.get("k8s_host", Config.K8S_DEFAULT_HOST)
+            k8s_port = ssh_config.get("k8s_port", Config.K8S_DEFAULT_PORT)
+            local_port = ssh_config.get("local_port", Config.K8S_DEFAULT_LOCAL_PORT)
             
             # Create SSH tunnel with disabled host key checking
             tunnel = SSHTunnelForwarder(
@@ -633,7 +748,7 @@ class KubernetesManager:
                 local_bind_address=('127.0.0.1', local_port),
                 # Disable host key verification to avoid yes/no prompts
                 ssh_config_file=None,
-                set_keepalive=30,
+                set_keepalive=Config.SSH_KEEPALIVE_SECONDS,
                 host_pkey_directories=[],
                 allow_agent=False,
                 compression=False
@@ -960,83 +1075,154 @@ class KubernetesManager:
     
     def execute_dpdk_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
         """Execute a command in all DPDK pods (vrdpdk) in contrail namespace."""
-        results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
         
-        for cluster in clusters_to_check:
-            try:
-                # Get pods in contrail namespace
-                pods = self.list_pods("contrail", cluster)
-                dpdk_pods = [pod for pod in pods if "vrdpdk" in pod["name"]]
-                
-                for pod in dpdk_pods:
-                    try:
-                        result = self.execute_pod_command(
-                            pod["name"], "contrail", command, None, cluster
-                        )
-                        result["pod_type"] = "DPDK"
-                        results.append(result)
-                    except Exception as e:
-                        results.append({
-                            "pod": pod["name"],
-                            "namespace": "contrail",
-                            "command": command,
-                            "cluster": cluster,
-                            "pod_type": "DPDK",
-                            "output": f"Failed to execute command: {str(e)}",
-                            "status": "error"
-                        })
-                        
-            except Exception as e:
-                results.append({
-                    "cluster": cluster,
-                    "namespace": "contrail",
-                    "command": command,
-                    "pod_type": "DPDK",
-                    "output": f"Failed to access cluster: {str(e)}",
-                    "status": "error"
-                })
+        # If only one cluster, use the original sequential approach
+        if len(clusters_to_check) == 1:
+            return self._execute_dpdk_command_single_cluster(command, clusters_to_check[0])
+        
+        # For multiple clusters, run in parallel
+        import concurrent.futures
+        import threading
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(clusters_to_check), Config.MAX_WORKERS)) as executor:
+            # Submit tasks for each cluster
+            future_to_cluster = {
+                executor.submit(self._execute_dpdk_command_single_cluster, command, cluster): cluster
+                for cluster in clusters_to_check
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_cluster):
+                cluster = future_to_cluster[future]
+                try:
+                    cluster_results = future.result(timeout=Config.CLUSTER_TIMEOUT_SECONDS)  # 60 second timeout per cluster
+                    results.extend(cluster_results)
+                except Exception as e:
+                    logger.error(f"Error executing DPDK command on cluster {cluster}: {e}")
+                    results.append({
+                        "cluster": cluster,
+                        "namespace": "contrail",
+                        "command": command,
+                        "pod_type": "DPDK",
+                        "output": f"Failed to access cluster: {str(e)}",
+                        "status": "error"
+                    })
+        
+        return results
+    
+    def _execute_dpdk_command_single_cluster(self, command: str, cluster: str) -> List[Dict[str, Any]]:
+        """Execute DPDK command on a single cluster."""
+        results = []
+        try:
+            # Get pods in contrail namespace
+            pods = self.list_pods("contrail", cluster)
+            dpdk_pods = [pod for pod in pods if "vrdpdk" in pod["name"]]
+            
+            for pod in dpdk_pods:
+                try:
+                    result = self.execute_pod_command(
+                        pod["name"], "contrail", command, None, cluster
+                    )
+                    result["pod_type"] = "DPDK"
+                    results.append(result)
+                except Exception as e:
+                    results.append({
+                        "pod": pod["name"],
+                        "namespace": "contrail",
+                        "command": command,
+                        "cluster": cluster,
+                        "pod_type": "DPDK",
+                        "output": f"Failed to execute command: {str(e)}",
+                        "status": "error"
+                    })
+                    
+        except Exception as e:
+            results.append({
+                "cluster": cluster,
+                "namespace": "contrail",
+                "command": command,
+                "pod_type": "DPDK",
+                "output": f"Failed to access cluster: {str(e)}",
+                "status": "error"
+            })
         
         return results
     
     def execute_agent_command(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
         """Execute a command in all Contrail Agent pods (vrouter-nodes) in contrail namespace."""
-        results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
         
-        for cluster in clusters_to_check:
-            try:
-                # Get pods in contrail namespace
-                pods = self.list_pods("contrail", cluster)
-                agent_pods = [pod for pod in pods if "vrouter-nodes" in pod["name"] and "vrdpdk" not in pod["name"]]
-                
-                for pod in agent_pods:
-                    try:
-                        result = self.execute_pod_command(
-                            pod["name"], "contrail", command, None, cluster
-                        )
-                        result["pod_type"] = "Agent"
-                        results.append(result)
-                    except Exception as e:
-                        results.append({
-                            "pod": pod["name"],
-                            "namespace": "contrail",
-                            "command": command,
-                            "cluster": cluster,
-                            "pod_type": "Agent",
-                            "output": f"Failed to execute command: {str(e)}",
-                            "status": "error"
-                        })
-                        
-            except Exception as e:
-                results.append({
-                    "cluster": cluster,
-                    "namespace": "contrail",
-                    "command": command,
-                    "pod_type": "Agent",
-                    "output": f"Failed to access cluster: {str(e)}",
-                    "status": "error"
-                })
+        # If only one cluster, use the original sequential approach
+        if len(clusters_to_check) == 1:
+            return self._execute_agent_command_single_cluster(command, clusters_to_check[0])
+        
+        # For multiple clusters, run in parallel
+        import concurrent.futures
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(clusters_to_check), 10)) as executor:
+            # Submit tasks for each cluster
+            future_to_cluster = {
+                executor.submit(self._execute_agent_command_single_cluster, command, cluster): cluster
+                for cluster in clusters_to_check
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_cluster):
+                cluster = future_to_cluster[future]
+                try:
+                    cluster_results = future.result(timeout=60)  # 60 second timeout per cluster
+                    results.extend(cluster_results)
+                except Exception as e:
+                    logger.error(f"Error executing Agent command on cluster {cluster}: {e}")
+                    results.append({
+                        "cluster": cluster,
+                        "namespace": "contrail",
+                        "command": command,
+                        "pod_type": "Agent",
+                        "output": f"Failed to access cluster: {str(e)}",
+                        "status": "error"
+                    })
+        
+        return results
+    
+    def _execute_agent_command_single_cluster(self, command: str, cluster: str) -> List[Dict[str, Any]]:
+        """Execute Agent command on a single cluster."""
+        results = []
+        try:
+            # Get pods in contrail namespace
+            pods = self.list_pods("contrail", cluster)
+            agent_pods = [pod for pod in pods if "vrouter-nodes" in pod["name"] and "vrdpdk" not in pod["name"]]
+            
+            for pod in agent_pods:
+                try:
+                    result = self.execute_pod_command(
+                        pod["name"], "contrail", command, None, cluster
+                    )
+                    result["pod_type"] = "Agent"
+                    results.append(result)
+                except Exception as e:
+                    results.append({
+                        "pod": pod["name"],
+                        "namespace": "contrail",
+                        "command": command,
+                        "cluster": cluster,
+                        "pod_type": "Agent",
+                        "output": f"Failed to execute command: {str(e)}",
+                        "status": "error"
+                    })
+                    
+        except Exception as e:
+            results.append({
+                "cluster": cluster,
+                "namespace": "contrail",
+                "command": command,
+                "pod_type": "Agent",
+                "output": f"Failed to access cluster: {str(e)}",
+                "status": "error"
+            })
         
         return results
     
@@ -1044,149 +1230,184 @@ class KubernetesManager:
         """Execute an HTTP command in all DPDK pods (vrdpdk) in contrail namespace.
         Uses both direct HTTP requests and curl fallback for better reliability.
         """
-        results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
         
-        for cluster in clusters_to_check:
-            try:
-                # Get pods in contrail namespace
-                pods = self.list_pods("contrail", cluster)
-                dpdk_pods = [pod for pod in pods if "vrdpdk" in pod["name"]]
-                
-                for pod in dpdk_pods:
+        # If only one cluster, use the original sequential approach
+        if len(clusters_to_check) == 1:
+            return self._execute_agent_http_command_single_cluster(command, clusters_to_check[0])
+        
+        # For multiple clusters, run in parallel
+        import concurrent.futures
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(clusters_to_check), 10)) as executor:
+            # Submit tasks for each cluster
+            future_to_cluster = {
+                executor.submit(self._execute_agent_http_command_single_cluster, command, cluster): cluster
+                for cluster in clusters_to_check
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_cluster):
+                cluster = future_to_cluster[future]
+                try:
+                    cluster_results = future.result(timeout=60)  # 60 second timeout per cluster
+                    results.extend(cluster_results)
+                except Exception as e:
+                    logger.error(f"Error executing HTTP command on cluster {cluster}: {e}")
+                    results.append({
+                        "cluster": cluster,
+                        "namespace": "contrail",
+                        "command": command,
+                        "pod_type": "DPDK",
+                        "output": f"Failed to access cluster: {str(e)}",
+                        "status": "error",
+                        "method": "unknown"
+                    })
+        
+        return results
+    
+    def _execute_agent_http_command_single_cluster(self, command: str, cluster: str) -> List[Dict[str, Any]]:
+        """Execute HTTP command on a single cluster."""
+        results = []
+        try:
+            # Get pods in contrail namespace
+            pods = self.list_pods("contrail", cluster)
+            dpdk_pods = [pod for pod in pods if "vrdpdk" in pod["name"]]
+            
+            for pod in dpdk_pods:
+                try:
+                    # Parse the HTTP command to extract the endpoint
+                    # Expected formats: "GET /endpoint" or just "/endpoint"
+                    if command.startswith("GET "):
+                        endpoint = command[4:].strip()
+                    elif command.startswith("/"):
+                        endpoint = command.strip()
+                    else:
+                        # Assume it's an endpoint without leading slash
+                        endpoint = f"/{command.strip()}"
+                    
+                    # Get pod info for HTTP requests
                     try:
-                        # Parse the HTTP command to extract the endpoint
-                        # Expected formats: "GET /endpoint" or just "/endpoint"
-                        if command.startswith("GET "):
-                            endpoint = command[4:].strip()
-                        elif command.startswith("/"):
-                            endpoint = command.strip()
-                        else:
-                            # Assume it's an endpoint without leading slash
-                            endpoint = f"/{command.strip()}"
-                        
-                        # Get pod info for HTTP requests
-                        try:
-                            k8s_client = self.get_k8s_client(cluster)
-                            pod_info = k8s_client.read_namespaced_pod(name=pod["name"], namespace="contrail")
-                            pod_ip = pod_info.status.pod_ip
-                        except Exception as pod_e:
-                            results.append({
-                                "pod": pod["name"],
-                                "namespace": "contrail",
-                                "command": command,
-                                "cluster": cluster,
-                                "pod_type": "DPDK",
-                                "output": f"Failed to get pod info: {str(pod_e)}",
-                                "status": "error",
-                                "method": "unknown"
-                            })
-                            continue
-                        
-                        if not pod_ip:
-                            results.append({
-                                "pod": pod["name"],
-                                "namespace": "contrail",
-                                "command": command,
-                                "cluster": cluster,
-                                "pod_type": "DPDK",
-                                "output": "Pod IP not available",
-                                "status": "error",
-                                "method": "unknown"
-                            })
-                            continue
-                        
-                        # Default HTTP port for Sandesh
-                        http_port = 8085
-                        
-                        # Try direct HTTP access first
-                        success = False
-                        method_used = "unknown"
-                        output_data = ""
-                        
-                        if HTTP_AVAILABLE:
-                            try:
-                                url = f"http://{pod_ip}:{http_port}{endpoint}"
-                                response = requests.get(url, timeout=10, headers={'Connection': 'close'})
-                                
-                                if response.status_code == 200:
-                                    output_data = response.text
-                                    method_used = "direct_http"
-                                    success = True
-                                else:
-                                    raise Exception(f"HTTP {response.status_code}: {response.text[:100]}")
-                                    
-                            except Exception as http_e:
-                                # Fallback to curl method via kubectl exec
-                                try:
-                                    curl_url = f"http://localhost:{http_port}{endpoint}"
-                                    curl_cmd = f"curl -s --connect-timeout 5 --max-time 10 '{curl_url}' 2>/dev/null"
-                                    
-                                    curl_result = self.execute_pod_command(
-                                        pod["name"], "contrail", curl_cmd, None, cluster
-                                    )
-                                    
-                                    if curl_result.get("status") == "success":
-                                        curl_output = curl_result.get("output", "")
-                                        # Check if curl output looks like valid data
-                                        if curl_output and len(curl_output.strip()) > 10 and not curl_output.startswith("curl:"):
-                                            output_data = curl_output
-                                            method_used = "curl_exec"
-                                            success = True
-                                        else:
-                                            output_data = f"Direct HTTP failed: {str(http_e)}. Curl failed: invalid/empty response"
-                                    else:
-                                        output_data = f"Direct HTTP failed: {str(http_e)}. Curl execution failed: {curl_result.get('output', 'Unknown error')}"
-                                        
-                                except Exception as curl_e:
-                                    output_data = f"Direct HTTP failed: {str(http_e)}. Curl fallback failed: {str(curl_e)}"
-                        else:
-                            output_data = "HTTP requests library not available"
-                        
-                        result = {
-                            "pod": pod["name"],
-                            "namespace": "contrail",
-                            "command": command,
-                            "cluster": cluster,
-                            "pod_type": "DPDK",
-                            "output": output_data,
-                            "status": "success" if success else "error",
-                            "method": method_used,
-                            "endpoint": endpoint,
-                            "pod_ip": pod_ip,
-                            "http_port": http_port
-                        }
-                        results.append(result)
-                        
-                    except Exception as e:
+                        k8s_client = self.get_k8s_client(cluster)
+                        pod_info = k8s_client.read_namespaced_pod(name=pod["name"], namespace="contrail")
+                        pod_ip = pod_info.status.pod_ip
+                    except Exception as pod_e:
                         results.append({
                             "pod": pod["name"],
                             "namespace": "contrail",
                             "command": command,
                             "cluster": cluster,
                             "pod_type": "DPDK",
-                            "output": f"Failed to execute HTTP command: {str(e)}",
+                            "output": f"Failed to get pod info: {str(pod_e)}",
                             "status": "error",
                             "method": "unknown"
                         })
-                        
-            except Exception as e:
-                results.append({
-                    "cluster": cluster,
-                    "namespace": "contrail",
-                    "command": command,
-                    "pod_type": "DPDK",
-                    "output": f"Failed to access cluster: {str(e)}",
-                    "status": "error",
-                    "method": "unknown"
-                })
+                        continue
+                    
+                    if not pod_ip:
+                        results.append({
+                            "pod": pod["name"],
+                            "namespace": "contrail",
+                            "command": command,
+                            "cluster": cluster,
+                            "pod_type": "DPDK",
+                            "output": "Pod IP not available",
+                            "status": "error",
+                            "method": "unknown"
+                        })
+                        continue
+                    
+                    # Default HTTP port for Sandesh
+                    http_port = 8085
+                    
+                    # Try direct HTTP access first
+                    success = False
+                    method_used = "unknown"
+                    output_data = ""
+                    
+                    if HTTP_AVAILABLE:
+                        try:
+                            url = f"http://{pod_ip}:{http_port}{endpoint}"
+                            response = requests.get(url, timeout=10, headers={'Connection': 'close'})
+                            
+                            if response.status_code == 200:
+                                output_data = response.text
+                                method_used = "direct_http"
+                                success = True
+                            else:
+                                raise Exception(f"HTTP {response.status_code}: {response.text[:100]}")
+                                
+                        except Exception as http_e:
+                            # Fallback to curl method via kubectl exec
+                            try:
+                                curl_url = f"http://localhost:{http_port}{endpoint}"
+                                curl_cmd = f"curl -s --connect-timeout 5 --max-time 10 '{curl_url}' 2>/dev/null"
+                                
+                                curl_result = self.execute_pod_command(
+                                    pod["name"], "contrail", curl_cmd, None, cluster
+                                )
+                                
+                                if curl_result.get("status") == "success":
+                                    curl_output = curl_result.get("output", "")
+                                    # Check if curl output looks like valid data
+                                    if curl_output and len(curl_output.strip()) > 10 and not curl_output.startswith("curl:"):
+                                        output_data = curl_output
+                                        method_used = "curl_exec"
+                                        success = True
+                                    else:
+                                        output_data = f"Direct HTTP failed: {str(http_e)}. Curl failed: invalid/empty response"
+                                else:
+                                    output_data = f"Direct HTTP failed: {str(http_e)}. Curl execution failed: {curl_result.get('output', 'Unknown error')}"
+                                    
+                            except Exception as curl_e:
+                                output_data = f"Direct HTTP failed: {str(http_e)}. Curl fallback failed: {str(curl_e)}"
+                    else:
+                        output_data = "HTTP requests library not available"
+                    
+                    result = {
+                        "pod": pod["name"],
+                        "namespace": "contrail",
+                        "command": command,
+                        "cluster": cluster,
+                        "pod_type": "DPDK",
+                        "output": output_data,
+                        "status": "success" if success else "error",
+                        "method": method_used,
+                        "endpoint": endpoint,
+                        "pod_ip": pod_ip,
+                        "http_port": http_port
+                    }
+                    results.append(result)
+                    
+                except Exception as e:
+                    results.append({
+                        "pod": pod["name"],
+                        "namespace": "contrail",
+                        "command": command,
+                        "cluster": cluster,
+                        "pod_type": "DPDK",
+                        "output": f"Failed to execute HTTP command: {str(e)}",
+                        "status": "error",
+                        "method": "unknown"
+                    })
+                    
+        except Exception as e:
+            results.append({
+                "cluster": cluster,
+                "namespace": "contrail",
+                "command": command,
+                "pod_type": "DPDK",
+                "output": f"Failed to access cluster: {str(e)}",
+                "status": "error",
+                "method": "unknown"
+            })
         
         return results
     
     def execute_junos_cli_commands(self, command: str, cluster_name: str = None) -> List[Dict[str, Any]]:
         """Execute a command in all cRPD and cSRX pods in jcnr namespace.
         Automatically prepends 'cli -c' to commands for proper Junos CLI execution."""
-        results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
         
         # If command doesn't start with cli -c, prepend it
@@ -1197,53 +1418,88 @@ class KubernetesManager:
             # Format the command properly for Junos CLI
             command = f"cli -c '{command}'"
         
-        for cluster in clusters_to_check:
-            try:
-                # Get pods in jcnr namespace
-                pods = self.list_pods("jcnr", cluster)
-                # Look for both cRPD and cSRX pods
-                junos_pods = [pod for pod in pods if any(pod_type in pod["name"].lower() for pod_type in ["crpd", "csrx"])]
-                
-                for pod in junos_pods:
-                    try:
-                        result = self.execute_pod_command(
-                            pod["name"], "jcnr", command, None, cluster
-                        )
-                        # Determine pod type based on name
-                        if "crpd" in pod["name"].lower():
-                            result["pod_type"] = "cRPD"
-                        elif "csrx" in pod["name"].lower():
-                            result["pod_type"] = "cSRX"
-                        else:
-                            result["pod_type"] = "Junos"
-                        results.append(result)
-                    except Exception as e:
-                        pod_type = "cRPD" if "crpd" in pod["name"].lower() else ("cSRX" if "csrx" in pod["name"].lower() else "Junos")
-                        results.append({
-                            "pod": pod["name"],
-                            "namespace": "jcnr",
-                            "command": command,
-                            "cluster": cluster,
-                            "pod_type": pod_type,
-                            "output": f"Failed to execute command: {str(e)}",
-                            "status": "error"
-                        })
-                        
-            except Exception as e:
-                results.append({
-                    "cluster": cluster,
-                    "namespace": "jcnr",
-                    "command": command,
-                    "pod_type": "Junos",
-                    "output": f"Failed to access cluster: {str(e)}",
-                    "status": "error"
-                })
+        # If only one cluster, use sequential approach
+        if len(clusters_to_check) == 1:
+            return self._execute_junos_cli_commands_single_cluster(command, clusters_to_check[0])
+        
+        # For multiple clusters, run in parallel
+        import concurrent.futures
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(clusters_to_check), 10)) as executor:
+            # Submit tasks for each cluster
+            future_to_cluster = {
+                executor.submit(self._execute_junos_cli_commands_single_cluster, command, cluster): cluster
+                for cluster in clusters_to_check
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_cluster):
+                cluster = future_to_cluster[future]
+                try:
+                    cluster_results = future.result(timeout=60)  # 60 second timeout per cluster
+                    results.extend(cluster_results)
+                except Exception as e:
+                    logger.error(f"Error executing Junos CLI command on cluster {cluster}: {e}")
+                    results.append({
+                        "cluster": cluster,
+                        "namespace": "jcnr",
+                        "command": command,
+                        "pod_type": "Junos",
+                        "output": f"Failed to access cluster: {str(e)}",
+                        "status": "error"
+                    })
+        
+        return results
+    
+    def _execute_junos_cli_commands_single_cluster(self, command: str, cluster: str) -> List[Dict[str, Any]]:
+        """Execute Junos CLI command on a single cluster."""
+        results = []
+        try:
+            # Get pods in jcnr namespace
+            pods = self.list_pods("jcnr", cluster)
+            # Look for both cRPD and cSRX pods
+            junos_pods = [pod for pod in pods if any(pod_type in pod["name"].lower() for pod_type in ["crpd", "csrx"])]
+            
+            for pod in junos_pods:
+                try:
+                    result = self.execute_pod_command(
+                        pod["name"], "jcnr", command, None, cluster
+                    )
+                    # Determine pod type based on name
+                    if "crpd" in pod["name"].lower():
+                        result["pod_type"] = "cRPD"
+                    elif "csrx" in pod["name"].lower():
+                        result["pod_type"] = "cSRX"
+                    else:
+                        result["pod_type"] = "Junos"
+                    results.append(result)
+                except Exception as e:
+                    pod_type = "cRPD" if "crpd" in pod["name"].lower() else ("cSRX" if "csrx" in pod["name"].lower() else "Junos")
+                    results.append({
+                        "pod": pod["name"],
+                        "namespace": "jcnr",
+                        "command": command,
+                        "cluster": cluster,
+                        "pod_type": pod_type,
+                        "output": f"Failed to execute command: {str(e)}",
+                        "status": "error"
+                    })
+                    
+        except Exception as e:
+            results.append({
+                "cluster": cluster,
+                "namespace": "jcnr",
+                "command": command,
+                "pod_type": "Junos",
+                "output": f"Failed to access cluster: {str(e)}",
+                "status": "error"
+            })
         
         return results
     
     def check_core_files(self, cluster_name: str = None, search_paths: List[str] = None, max_age_days: int = 7) -> List[Dict[str, Any]]:
         """Check for core files on nodes in Kubernetes clusters."""
-        results = []
         clusters_to_check = [cluster_name] if cluster_name else list(self.clusters_config.keys())
         
         # Default search paths for core files
@@ -1257,119 +1513,152 @@ class KubernetesManager:
         
         paths_to_search = search_paths if search_paths else default_search_paths
         
-        for cluster in clusters_to_check:
-            try:
-                # Get Kubernetes client for this specific cluster
-                self.get_k8s_client(cluster)
-                v1 = client.CoreV1Api()
-                nodes = v1.list_node()
-                
-                for node in nodes.items:
-                    node_name = node.metadata.name
-                    try:
-                        # Try to find a pod running on this node to execute commands
-                        # We'll use any pod that has host filesystem access
-                        pods = v1.list_pod_for_all_namespaces(field_selector=f"spec.nodeName={node_name}")
-                        
-                        # Look for privileged pods or system pods that can access host filesystem
-                        suitable_pods = []
-                        for pod in pods.items:
-                            if (pod.metadata.namespace in ["kube-system", "contrail", "jcnr"] or
-                                any("system" in container.name or "node" in container.name 
-                                    for container in pod.spec.containers)):
-                                suitable_pods.append(pod)
-                        
-                        if not suitable_pods:
-                            results.append({
-                                "cluster": cluster,
-                                "node": node_name,
-                                "error": "No suitable pod found on node to execute core file check",
-                                "core_files": []
-                            })
-                            continue
-                        
-                        # Use the first suitable pod
-                        pod = suitable_pods[0]
-                        
-                        # Build find command to search for core files
-                        find_commands = []
-                        for path in paths_to_search:
-                            # Search for files named core* that are newer than max_age_days
-                            # Use ls -la with find for better portability across different systems
-                            find_cmd = f"find {path} -name 'core*' -type f -mtime -{max_age_days} -exec ls -la {{}} \\; 2>/dev/null || true"
-                            find_commands.append(find_cmd)
-                        
-                        # Combine all find commands with semicolons instead of &&
-                        full_command = "; ".join(find_commands)
-                        
-                        # Execute the command
-                        command_result = self.execute_pod_command(
-                            pod.metadata.name, 
-                            pod.metadata.namespace, 
-                            f"sh -c '{full_command}'", 
-                            None, 
-                            cluster
-                        )
-                        
-                        core_files = []
-                        if command_result.get("status") == "success" and command_result.get("output"):
-                            output_lines = command_result["output"].strip().split('\n')
-                            for line in output_lines:
-                                if line.strip() and ("core" in line.lower() or line.startswith('-')):
-                                    try:
-                                        # Parse ls -la output format: permissions owner group size date time filename
-                                        # Example: -rw-r--r-- 1 root root 12345678 Dec 15 10:30 /path/to/core.12345
-                                        parts = line.strip().split()
-                                        if len(parts) >= 9 and parts[0].startswith('-'):  # File (not directory)
-                                            file_path = " ".join(parts[8:])  # Join remaining parts for full path
-                                            size_bytes = parts[4] if parts[4].isdigit() else "0"
-                                            
-                                            # Extract date and time (parts 5, 6, 7)
-                                            date_str = f"{parts[5]} {parts[6]} {parts[7]}" if len(parts) >= 8 else "unknown"
-                                            
-                                            # Convert size to human readable format
-                                            size_mb = int(size_bytes) / (1024 * 1024) if size_bytes.isdigit() else 0
-                                            size_str = f"{size_mb:.1f} MB" if size_mb > 1 else f"{size_bytes} bytes"
-                                            
-                                            core_files.append({
-                                                "path": file_path,
-                                                "size": size_str,
-                                                "modified": date_str,
-                                                "age_days": f"< {max_age_days}"
-                                            })
-                                    except Exception as e:
-                                        logger.warning(f"Failed to parse ls output line: {line}, error: {e}")
-                                        # Fallback: if parsing fails but line contains 'core', treat it as a potential core file
-                                        if "core" in line.lower():
-                                            core_files.append({
-                                                "path": line.strip(),
-                                                "size": "unknown",
-                                                "modified": "unknown", 
-                                                "age_days": f"< {max_age_days}"
-                                            })
-                        
+        # If only one cluster, use sequential approach
+        if len(clusters_to_check) == 1:
+            return self._check_core_files_single_cluster(clusters_to_check[0], paths_to_search, max_age_days)
+        
+        # For multiple clusters, run in parallel
+        import concurrent.futures
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(clusters_to_check), 10)) as executor:
+            # Submit tasks for each cluster
+            future_to_cluster = {
+                executor.submit(self._check_core_files_single_cluster, cluster, paths_to_search, max_age_days): cluster
+                for cluster in clusters_to_check
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_cluster):
+                cluster = future_to_cluster[future]
+                try:
+                    cluster_results = future.result(timeout=120)  # 120 second timeout per cluster for file operations
+                    results.extend(cluster_results)
+                except Exception as e:
+                    logger.error(f"Error checking core files on cluster {cluster}: {e}")
+                    results.append({
+                        "cluster": cluster,
+                        "error": f"Failed to access cluster: {str(e)}",
+                        "core_files": []
+                    })
+        
+        return results
+    
+    def _check_core_files_single_cluster(self, cluster: str, paths_to_search: List[str], max_age_days: int) -> List[Dict[str, Any]]:
+        """Check for core files on a single cluster."""
+        results = []
+        try:
+            # Get Kubernetes client for this specific cluster
+            self.get_k8s_client(cluster)
+            v1 = client.CoreV1Api()
+            nodes = v1.list_node()
+            
+            for node in nodes.items:
+                node_name = node.metadata.name
+                try:
+                    # Try to find a pod running on this node to execute commands
+                    # We'll use any pod that has host filesystem access
+                    pods = v1.list_pod_for_all_namespaces(field_selector=f"spec.nodeName={node_name}")
+                    
+                    # Look for privileged pods or system pods that can access host filesystem
+                    suitable_pods = []
+                    for pod in pods.items:
+                        if (pod.metadata.namespace in ["kube-system", "contrail", "jcnr"] or
+                            any("system" in container.name or "node" in container.name 
+                                for container in pod.spec.containers)):
+                            suitable_pods.append(pod)
+                    
+                    if not suitable_pods:
                         results.append({
                             "cluster": cluster,
                             "node": node_name,
-                            "core_files": core_files,
-                            "search_paths": paths_to_search,
-                            "pod_used": f"{pod.metadata.namespace}/{pod.metadata.name}"
-                        })
-                        
-                    except Exception as e:
-                        results.append({
-                            "cluster": cluster,
-                            "node": node_name,
-                            "error": f"Failed to check core files: {str(e)}",
+                            "error": "No suitable pod found on node to execute core file check",
                             "core_files": []
                         })
-                        
-            except Exception as e:
-                results.append({
-                    "cluster": cluster,
-                    "error": f"Failed to access cluster: {str(e)}",
-                    "core_files": []
-                })
+                        continue
+                    
+                    # Use the first suitable pod
+                    pod = suitable_pods[0]
+                    
+                    # Build find command to search for core files
+                    find_commands = []
+                    for path in paths_to_search:
+                        # Search for files named core* that are newer than max_age_days
+                        # Use ls -la with find for better portability across different systems
+                        find_cmd = f"find {path} -name 'core*' -type f -mtime -{max_age_days} -exec ls -la {{}} \\; 2>/dev/null || true"
+                        find_commands.append(find_cmd)
+                    
+                    # Combine all find commands with semicolons instead of &&
+                    full_command = "; ".join(find_commands)
+                    
+                    # Execute the command
+                    command_result = self.execute_pod_command(
+                        pod.metadata.name, 
+                        pod.metadata.namespace, 
+                        f"sh -c '{full_command}'", 
+                        None, 
+                        cluster
+                    )
+                    
+                    core_files = []
+                    if command_result.get("status") == "success" and command_result.get("output"):
+                        output_lines = command_result["output"].strip().split('\n')
+                        for line in output_lines:
+                            if line.strip() and ("core" in line.lower() or line.startswith('-')):
+                                try:
+                                    # Parse ls -la output format: permissions owner group size date time filename
+                                    # Example: -rw-r--r-- 1 root root 12345678 Dec 15 10:30 /path/to/core.12345
+                                    parts = line.strip().split()
+                                    if len(parts) >= 9 and parts[0].startswith('-'):  # File (not directory)
+                                        file_path = " ".join(parts[8:])  # Join remaining parts for full path
+                                        size_bytes = parts[4] if parts[4].isdigit() else "0"
+                                        
+                                        # Extract date and time (parts 5, 6, 7)
+                                        date_str = f"{parts[5]} {parts[6]} {parts[7]}" if len(parts) >= 8 else "unknown"
+                                        
+                                        # Convert size to human readable format
+                                        size_mb = int(size_bytes) / (1024 * 1024) if size_bytes.isdigit() else 0
+                                        size_str = f"{size_mb:.1f} MB" if size_mb > 1 else f"{size_bytes} bytes"
+                                        
+                                        core_files.append({
+                                            "path": file_path,
+                                            "size": size_str,
+                                            "modified": date_str,
+                                            "age_days": f"< {max_age_days}"
+                                        })
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse ls output line: {line}, error: {e}")
+                                    # Fallback: if parsing fails but line contains 'core', treat it as a potential core file
+                                    if "core" in line.lower():
+                                        core_files.append({
+                                            "path": line.strip(),
+                                            "size": "unknown",
+                                            "modified": "unknown", 
+                                            "age_days": f"< {max_age_days}"
+                                        })
+                    
+                    results.append({
+                        "cluster": cluster,
+                        "node": node_name,
+                        "core_files": core_files,
+                        "search_paths": paths_to_search,
+                        "pod_used": f"{pod.metadata.namespace}/{pod.metadata.name}"
+                    })
+                    
+                except Exception as e:
+                    results.append({
+                        "cluster": cluster,
+                        "node": node_name,
+                        "error": f"Failed to check core files: {str(e)}",
+                        "core_files": []
+                    })
+                    
+        except Exception as e:
+            results.append({
+                "cluster": cluster,
+                "error": f"Failed to access cluster: {str(e)}",
+                "core_files": []
+            })
         
         return results
     
@@ -2302,7 +2591,7 @@ class XMLTableFormatter:
 class EnhancedMCPServer:
     """Enhanced MCP Server with Kubernetes integration supporting both HTTP and stdio transports."""
     
-    def __init__(self, transport: str = "http", port: int = 40041, clusters_config_path: str = None):
+    def __init__(self, transport: str = "http", port: int = Config.DEFAULT_HTTP_PORT, clusters_config_path: str = None):
         self.transport = transport
         self.port = port
         
@@ -4550,17 +4839,6 @@ The server will use the default kubeconfig if no cluster name is specified.
         """Start the stdio server."""
         logger.info("Starting stdio server")
                 
-        capabilities = ServerCapabilities(
-            tools=ToolsCapability(listChanged=True),
-            resources=ResourcesCapability(subscribe=True, listChanged=True)
-        )
-        
-        init_options = InitializationOptions(
-            server_name=f"enhanced-mcp-{self.transport}-server",
-            server_version="2.1.0",
-            capabilities=capabilities
-        )
-        
         # Run the MCP server with stdio transport
         async with stdio_server() as (read_stream, write_stream):
             await self.mcp_server.run(read_stream, write_stream, init_options)
