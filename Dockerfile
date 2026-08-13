@@ -60,8 +60,8 @@ if [ -d "/app/.ssh" ] && [ "$(ls -A /app/.ssh 2>/dev/null)" ]; then\n\
     done\n\
 fi\n\
 \n\
-# Start the server\n\
-exec python enhanced_mcp_server.py --port "${YAMS_PORT}" --clusters-config "${YAMS_CONFIG_PATH}"\n\
+# Start the server (MCP 2.0 Streamable HTTP transport)\n\
+exec python enhanced_mcp_server.py --transport streamable-http --port "${YAMS_PORT}" --clusters-config "${YAMS_CONFIG_PATH}"\n\
 ' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Create non-root user for security
@@ -72,9 +72,9 @@ USER yams
 # Expose the default port
 EXPOSE 40041
 
-# Health check
+# Health check - verify the MCP streamable-http endpoint is reachable
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${YAMS_PORT:-40041}/health || exit 1
+    CMD curl -f -s -o /dev/null http://localhost:${YAMS_PORT:-40041}/mcp || exit 1
 
 # Use entrypoint script
 ENTRYPOINT ["/app/entrypoint.sh"]

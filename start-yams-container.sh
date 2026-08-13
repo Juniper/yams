@@ -2,6 +2,7 @@
 
 # YAMS MCP Server - Simple Container Run Script
 # Standalone Docker or Podman deployment
+# Uses MCP 2.0 Streamable HTTP transport (enhanced_mcp_server.py)
 
 set -e
 
@@ -14,6 +15,7 @@ echo "==========================================="
 
 # Function to check if command exists
 command_exists() {
+ 
     command -v "$1" >/dev/null 2>&1
 }
 
@@ -38,7 +40,7 @@ fi
 
 # Build the image
 echo "🔨 Building YAMS MCP Server image using $RUNTIME..."
-"$RUNTIME" build -t "${IMAGE_NAME}" .
+"$RUNTIME" build --no-cache -t "${IMAGE_NAME}" .
 
 echo "✅ Image built successfully"
 
@@ -84,6 +86,7 @@ echo "🚀 Starting YAMS MCP Server container..."
     --name "${CONTAINER_NAME}" \
     -p "${PORT}:${PORT}" \
     ${CONTAINER_VOLUMES} \
+    -e YAMS_PORT="${PORT}" \
     --restart unless-stopped \
     "${IMAGE_NAME}"
 
@@ -94,7 +97,7 @@ sleep 5
 if "$RUNTIME" ps --format 'table {{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "✅ YAMS MCP Server is running!"
     echo "🌐 Server: http://localhost:${PORT}"
-    echo "🏥 Health: http://localhost:${PORT}/health"
+    echo "🔌 MCP endpoint (streamable-http): http://localhost:${PORT}/mcp"
     echo ""
     echo "📂 Configuration directories:"
     echo "  Clusters:     ./clusters/"

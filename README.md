@@ -1,4 +1,8 @@
-# YAMS (Yet Another MCP Server)
+# YAMS
+
+> **MCP 2.0 supported.** This server implements the MCP 2.0 **Streamable HTTP** transport
+> (`--transport streamable-http`) at the `/mcp` endpoint, in addition to the legacy HTTP and
+> stdio transports. Requires the official MCP SDK (`mcp>=1.9.0,<2.0.0`). (Yet Another MCP Server)
 
 **YAMS** is a powerful Model Context Protocol (MCP) server designed for analyzing services running on Kubernetes clusters. YAMS supports both **HTTP** and **stdio** transport modes, providing seamless integration with VS Code Copilot Chat and other MCP-compatible tools.
 

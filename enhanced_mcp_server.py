@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mcp.types as types
-from mcp.server import Server
+from mcp.server.lowlevel import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 
@@ -148,7 +148,7 @@ class Config:
     # Server Settings
     DEFAULT_HTTP_PORT = 40041
     SERVER_VERSION = "2.1.0"
-    MCP_PROTOCOL_VERSION = "2024-11-05"
+    MCP_PROTOCOL_VERSION = "2025-06-18"
     
     # Logging Settings
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -1083,7 +1083,6 @@ class KubernetesManager:
         
         # For multiple clusters, run in parallel
         import concurrent.futures
-        import threading
         
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(clusters_to_check), Config.MAX_WORKERS)) as executor:
@@ -2399,7 +2398,6 @@ class XMLTableFormatter:
             table_lines.append("-" * 120)
             
             # Parse each next-hop entry
-            count = 0
             for nh in nh_elements[:max_rows]:
                 nh_id = nh.find("nh_index").text if nh.find("nh_index") is not None else "N/A"
                 nh_type = nh.find("type").text if nh.find("type") is not None else "N/A"
@@ -2410,7 +2408,6 @@ class XMLTableFormatter:
                 vxlan_flag = "Yes" if nh.find("vxlan_flag") is not None and nh.find("vxlan_flag").text == "true" else "No"
                 
                 table_lines.append(f"{nh_id:<5} {nh_type:<15} {ref_count:<8} {valid:<6} {policy:<8} {interface:<15} {vxlan_flag:<6}")
-                count += 1
             
             if len(nh_elements) > max_rows:
                 table_lines.append(f"... and {len(nh_elements) - max_rows} more entries (showing first {max_rows})")
@@ -2488,7 +2485,6 @@ class XMLTableFormatter:
             table_lines.append("-" * 120)
             
             # Parse each route entry
-            count = 0
             for route in route_elements[:max_rows]:
                 src_ip = route.find("src_ip").text if route.find("src_ip") is not None else "N/A"
                 src_plen = route.find("src_plen").text if route.find("src_plen") is not None else "0"
@@ -2523,7 +2519,6 @@ class XMLTableFormatter:
                                 peer = peer[:9] + "..."
                 
                 table_lines.append(f"{prefix:<25} {src_plen:<4} {vrf:<30} {nh_index:<10} {label:<8} {peer:<15}")
-                count += 1
             
             if len(route_elements) > max_rows:
                 table_lines.append(f"... and {len(route_elements) - max_rows} more routes (showing first {max_rows})")
@@ -2558,7 +2553,6 @@ class XMLTableFormatter:
             table_lines.append("-" * 120)
             
             # Parse each interface entry
-            count = 0
             for intf in intf_elements[:max_rows]:
                 index = intf.find("index").text if intf.find("index") is not None else "N/A"
                 name = intf.find("name").text if intf.find("name") is not None else "N/A"
@@ -2573,7 +2567,6 @@ class XMLTableFormatter:
                     vrf_name = vrf_name[:17] + "..."
                 
                 table_lines.append(f"{index:<6} {name:<15} {intf_type:<8} {active:<8} {vrf_name:<25} {ip_addr:<15} {mac_addr:<18}")
-                count += 1
             
             if len(intf_elements) > max_rows:
                 table_lines.append(f"... and {len(intf_elements) - max_rows} more interfaces (showing first {max_rows})")
@@ -4713,20 +4706,23 @@ The server will use the default kubeconfig if no cluster name is specified.
                 # Handle initialization
                 if request.method == "initialize":
                     params = request.params or {}
-                    capabilities = params.get("capabilities", {})
                     client_info = params.get("clientInfo", {})
                     
                     logger.info(f"Initializing with client: {client_info}")
                     
+                    # Echo back the client's requested protocol version when provided
+                    # (protocol version negotiation), falling back to our default.
+                    requested_version = params.get("protocolVersion", Config.MCP_PROTOCOL_VERSION)
+                    
                     result = {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": requested_version,
                         "capabilities": {
                             "tools": {"listChanged": True},
                             "resources": {"subscribe": True, "listChanged": True}
                         },
                         "serverInfo": {
                             "name": "enhanced-mcp-http-server",
-                            "version": "2.0.0"
+                            "version": Config.SERVER_VERSION
                         }
                     }
                     
@@ -4813,6 +4809,8 @@ The server will use the default kubeconfig if no cluster name is specified.
         try:
             if self.transport == "http":
                 await self._start_http_server()
+            elif self.transport == "streamable-http":
+                await self._start_streamable_http_server()
             elif self.transport == "stdio":
                 await self._start_stdio_server()
             else:
@@ -4835,10 +4833,76 @@ The server will use the default kubeconfig if no cluster name is specified.
         server = uvicorn.Server(config)
         await server.serve()
     
+    async def _start_streamable_http_server(self):
+        """Start the MCP 2.0 Streamable HTTP server.
+
+        Uses the modern MCP SDK's StreamableHTTPSessionManager to expose the
+        existing low-level Server (and its tool/resource decorators) over the
+        Streamable HTTP transport at the /mcp endpoint. This is the defining
+        transport of MCP 2.0 and coexists with the legacy custom HTTP endpoint.
+        """
+        logger.info(f"Starting MCP 2.0 Streamable HTTP server on port {self.port}")
+
+        try:
+            import contextlib
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+            from starlette.applications import Starlette
+            from starlette.routing import Mount
+            from starlette.types import Receive, Scope, Send
+        except ImportError as e:
+            raise Exception(
+                "MCP 2.0 Streamable HTTP transport requires a newer 'mcp' SDK and "
+                f"'starlette'. Install with: pip install 'mcp>=1.9.0'. Details: {e}"
+            )
+
+        # Create the session manager wrapping our existing low-level MCP server.
+        session_manager = StreamableHTTPSessionManager(
+            app=self.mcp_server,
+            event_store=None,
+            json_response=False,
+            stateless=True,
+        )
+
+        async def handle_streamable_http(scope: Scope, receive: Receive, send: Send) -> None:
+            await session_manager.handle_request(scope, receive, send)
+
+        @contextlib.asynccontextmanager
+        async def lifespan(app: Starlette):
+            async with session_manager.run():
+                logger.info("MCP 2.0 Streamable HTTP session manager started")
+                try:
+                    yield
+                finally:
+                    logger.info("MCP 2.0 Streamable HTTP session manager stopped")
+
+        star_app = Starlette(
+            debug=False,
+            routes=[Mount("/mcp", app=handle_streamable_http)],
+            lifespan=lifespan,
+        )
+
+        config = uvicorn.Config(
+            app=star_app,
+            host="0.0.0.0",
+            port=self.port,
+            log_level="info",
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+    
     async def _start_stdio_server(self):
         """Start the stdio server."""
         logger.info("Starting stdio server")
                 
+        init_options = InitializationOptions(
+            server_name=f"enhanced-mcp-{self.transport}-server",
+            server_version=Config.SERVER_VERSION,
+            capabilities=self.mcp_server.get_capabilities(
+                notification_options=NotificationOptions(),
+                experimental_capabilities={},
+            ),
+        )
+
         # Run the MCP server with stdio transport
         async with stdio_server() as (read_stream, write_stream):
             await self.mcp_server.run(read_stream, write_stream, init_options)
@@ -4850,9 +4914,9 @@ async def main():
     parser.add_argument(
         "--transport",
         type=str,
-        choices=["http", "stdio"],
+        choices=["http", "streamable-http", "stdio"],
         default="http",
-        help="Transport protocol to use (default: http)"
+        help="Transport protocol to use (default: http). Use 'streamable-http' for MCP 2.0."
     )
     parser.add_argument(
         "--port", 
