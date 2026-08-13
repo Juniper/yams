@@ -630,20 +630,20 @@ This comprehensive analysis demonstrates YAMS's capability to:
 
 ### Prerequisites
 
-- Docker and Docker Compose installed
+- Docker or Containerd installed
 - Kubernetes cluster access with appropriate RBAC permissions
 - SSH access to remote clusters (if applicable)
 - VS Code with MCP support (optional but recommended)
 
-### Quick Start with Docker
+### Quick Start with Docker or Containerd
 
 ```bash
 # Clone YAMS repository
 git clone https://github.com/Juniper/yams.git yams-github
 cd yams-github
 
-# Quick start with Docker
-./docker-run.sh
+# Quick start with Docker/Containerd
+./start-yams-container.sh
 
 # Verify installation
 curl http://localhost:40041/health
@@ -851,7 +851,7 @@ For organizations running JCNR in production, YAMS offers a practical solution t
 
 ## Getting Started
 
-1. **Download and install YAMS** using the Docker quick-start method
+1. **Download and install YAMS** using the Docker/Containerd quick-start method
 2. **Configure your JCNR clusters** in the JSON configuration format
 3. **Set up command lists** for your specific JCNR deployment patterns
 4. **Integrate with VS Code** for enhanced workflow capabilities

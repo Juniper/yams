@@ -181,7 +181,7 @@ Docker provides an isolated, reproducible environment with all dependencies incl
 
 ```bash
 # Quick start - automated setup
-./docker-run.sh
+./start-yams-container.sh
 
 # Check health
 curl http://localhost:40041/health
@@ -990,7 +990,7 @@ YAMS includes Docker support for easy deployment and consistent environments.
 
 ```bash
 # Automated setup
-./docker-run.sh
+./start-yams-container.sh
 ```
 
 ### Directory Setup

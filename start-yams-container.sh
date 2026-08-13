@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# YAMS MCP Server - Simple Docker Run Script
-# Standalone Docker deployment
+# YAMS MCP Server - Simple Container Run Script
+# Standalone Docker or Podman deployment
 
 set -e
 
@@ -9,32 +9,36 @@ IMAGE_NAME="yams-mcp-server"
 CONTAINER_NAME="yams-mcp-server"
 PORT="40041"
 
-echo "🐳 YAMS MCP Server - Simple Docker Setup"
-echo "========================================"
+echo "📦 YAMS MCP Server - Simple Container Setup"
+echo "==========================================="
 
 # Function to check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Check if Docker is available
-if ! command_exists docker; then
-    echo "❌ Docker is not installed. Please install Docker first."
+# Auto-detect container runtime (Docker or Podman)
+if command_exists docker; then
+    RUNTIME="docker"
+elif command_exists podman; then
+    RUNTIME="podman"
+else
+    echo "❌ Neither Docker nor Podman is installed. Please install a container runtime first."
     exit 1
 fi
 
-echo "✅ Docker is available"
+echo "✅ Container runtime available: $RUNTIME"
 
 # Stop and remove existing container if it exists
-if docker ps -a --format 'table {{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+if "$RUNTIME" ps -a --format 'table {{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "🛑 Stopping and removing existing container..."
-    docker stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-    docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    "$RUNTIME" stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    "$RUNTIME" rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 fi
 
 # Build the image
-echo "🔨 Building YAMS MCP Server image..."
-docker build -t "${IMAGE_NAME}" .
+echo "🔨 Building YAMS MCP Server image using $RUNTIME..."
+"$RUNTIME" build -t "${IMAGE_NAME}" .
 
 echo "✅ Image built successfully"
 
@@ -56,30 +60,30 @@ if [ ! -d "kubeconfigs" ]; then
     mkdir -p kubeconfigs
 fi
 
-# Prepare docker run command with optional volume mounts
-DOCKER_VOLUMES=""
+# Prepare volume mounts with an engine-agnostic variable
+CONTAINER_VOLUMES=""
 
 # Always mount config directory
-DOCKER_VOLUMES="${DOCKER_VOLUMES} -v $(pwd)/clusters:/app/clusters"
+CONTAINER_VOLUMES="${CONTAINER_VOLUMES} -v $(pwd)/clusters:/app/clusters"
 
 # Mount SSH keys if directory exists and has content
 if [ -d "sshkeys" ] && [ "$(ls -A sshkeys 2>/dev/null)" ]; then
-    DOCKER_VOLUMES="${DOCKER_VOLUMES} -v $(pwd)/sshkeys:/app/.ssh:ro"
+    CONTAINER_VOLUMES="${CONTAINER_VOLUMES} -v $(pwd)/sshkeys:/app/.ssh:ro"
     echo "🔑 Mounting SSH keys from ./sshkeys"
 fi
 
 # Mount kubeconfig if directory exists and has content
 if [ -d "kubeconfigs" ] && [ "$(ls -A kubeconfigs 2>/dev/null)" ]; then
-    DOCKER_VOLUMES="${DOCKER_VOLUMES} -v $(pwd)/kubeconfigs:/app/kubeconfigs:ro"
+    CONTAINER_VOLUMES="${CONTAINER_VOLUMES} -v $(pwd)/kubeconfigs:/app/kubeconfigs:ro"
     echo "⚙️  Mounting kubeconfigs from ./kubeconfigs"
 fi
 
 # Run the container
-echo "🚀 Starting YAMS MCP Server..."
-docker run -d \
+echo "🚀 Starting YAMS MCP Server container..."
+"$RUNTIME" run -d \
     --name "${CONTAINER_NAME}" \
     -p "${PORT}:${PORT}" \
-    ${DOCKER_VOLUMES} \
+    ${CONTAINER_VOLUMES} \
     --restart unless-stopped \
     "${IMAGE_NAME}"
 
@@ -87,23 +91,23 @@ echo "⏳ Waiting for service to start..."
 sleep 5
 
 # Check if container is running
-if docker ps --format 'table {{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+if "$RUNTIME" ps --format 'table {{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "✅ YAMS MCP Server is running!"
     echo "🌐 Server: http://localhost:${PORT}"
     echo "🏥 Health: http://localhost:${PORT}/health"
     echo ""
-    echo "� Configuration directories:"
+    echo "📂 Configuration directories:"
     echo "  Clusters:     ./clusters/"
     echo "  SSH keys:     ./sshkeys/"
     echo "  Kubeconfigs:  ./kubeconfigs/"
     echo ""
-    echo "�📖 Useful commands:"
-    echo "  View logs:    docker logs -f ${CONTAINER_NAME}"
-    echo "  Stop:         docker stop ${CONTAINER_NAME}"
-    echo "  Remove:       docker rm ${CONTAINER_NAME}"
-    echo "  Shell:        docker exec -it ${CONTAINER_NAME} /bin/bash"
+    echo "📖 Useful commands:"
+    echo "  View logs:    $RUNTIME logs -f ${CONTAINER_NAME}"
+    echo "  Stop:         $RUNTIME stop ${CONTAINER_NAME}"
+    echo "  Remove:       $RUNTIME rm ${CONTAINER_NAME}"
+    echo "  Shell:        $RUNTIME exec -it ${CONTAINER_NAME} /bin/bash"
 else
     echo "❌ Failed to start container. Check logs:"
-    docker logs "${CONTAINER_NAME}"
+    "$RUNTIME" logs "${CONTAINER_NAME}"
     exit 1
 fi
